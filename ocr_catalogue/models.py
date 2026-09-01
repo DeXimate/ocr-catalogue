@@ -12,11 +12,16 @@ class Product:
     produit: str = ""
     designation_ar: str = ""
     marque: str = ""
+    modele: str = ""
     quantite: str = ""
     prix_promo: str = ""
     ancien_prix: str = ""
     remise: str = ""
     promotion: str = ""
+    cashback: str = ""
+    price_basis: str = ""
+    specifications: list[str] = field(default_factory=list)
+    raisons_revision: list[str] = field(default_factory=list)
     page: int = 1
     confiance: int = 0
     statut: str = "À vérifier"

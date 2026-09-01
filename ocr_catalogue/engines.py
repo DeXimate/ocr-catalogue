@@ -469,37 +469,8 @@ def _crop_images(page_image: Path, bbox: tuple[float, float, float, float], pdf_
 
 def extract_pdf(source: Path, folder: Path, progress=None) -> list[Product]:
     pages = render_pdf(source, folder / "pages")
-    products: list[Product] = []
-    with pdfplumber.open(source) as pdf:
-        for page_index, page in enumerate(pdf.pages):
-            words = page.extract_words(use_text_flow=False, keep_blank_chars=False) or []
-            tokens = [Token(str(w["text"]), float(w["x0"]), float(w["top"]), float(w["x1"]), float(w["bottom"])) for w in words]
-            price_candidates = _merge_price_tokens(tokens)
-            reference_prices = [(value, token) for value, token in price_candidates if _is_reference_price(token, tokens)]
-            prices = [(value, token) for value, token in price_candidates if not _is_reference_price(token, tokens)]
-            anchors = [token for _, token in prices]
-            for price, anchor in prices:
-                bbox, crop_mode = _product_region(page, anchor, anchors)
-                if not _valid_product_region(page, anchor, bbox):
-                    continue
-                region = [t for t in tokens if bbox[0] <= t.cx <= bbox[2] and bbox[1] <= t.cy <= bbox[3]]
-                references = [
-                    (value, token) for value, token in reference_prices
-                    if bbox[0] <= token.cx <= bbox[2] and bbox[1] <= token.cy <= bbox[3]
-                ]
-                ancien_prix = min(references, key=lambda item: abs(item[1].cx - anchor.cx) + abs(item[1].cy - anchor.cy))[0] + " DT" if references else ""
-                produit, ar, marque, quantite, promotion, confidence = _text_fields(region, price, anchor)
-                uid = uuid.uuid4().hex[:10]
-                crop_rel = f"crops/{uid}.jpg"
-                product_rel = f"products/{uid}.png"
-                # The catalogue itself is the source of truth: export the full
-                # product cell, preserving its background, packshot, price and
-                # promotional badge. Embedded PDF images may be tiled or masks.
-                review = _crop_images(pages[page_index], bbox, (page.width, page.height), folder / crop_rel, folder / product_rel, None)
-                products.append(Product(id=uid, photo=product_rel, source_crop=crop_rel, produit=produit, designation_ar=ar, marque=marque, quantite=quantite, prix_promo=price + " DT", ancien_prix=ancien_prix, remise=next((x.text for x in region if PERCENT.match(x.text.replace(" ", ""))), ""), promotion=promotion, page=page_index + 1, confiance=min(confidence, 79 if review else confidence), bbox=list(bbox), crop_mode=crop_mode))
-            if progress:
-                progress(page_index + 1, len(pdf.pages))
-    return products
+    from .pipeline import extract_offers
+    return extract_offers(source, folder, pages, progress)
 
 
 def import_image(source: Path, folder: Path) -> list[Product]:
