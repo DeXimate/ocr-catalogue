@@ -3,3 +3,5 @@ __pycache__/
 data/jobs/
 data/test-output/
 .pytest_cache/
+*/crops/
+crops/
