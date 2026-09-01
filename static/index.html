@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OCR Catalogue Monoprix</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header>
+    <div><span class="logo">M</span><div><h1>OCR Catalogue</h1><p>Extraction locale de produits Monoprix</p></div></div>
+    <label class="import">Importer un catalogue<input id="file" type="file" accept=".pdf,.jpg,.jpeg,.png"></label>
+  </header>
+  <main>
+    <section class="toolbar">
+      <select id="jobs"><option value="">Choisir un traitement</option></select>
+      <input id="search" placeholder="Rechercher un produit ou une marque">
+      <select id="status"><option value="">Tous les statuts</option><option>À vérifier</option><option>Validé</option></select>
+      <button id="validate">Valider la sélection</button>
+      <button id="save" class="secondary">Enregistrer</button>
+      <button id="export">Exporter</button>
+    </section>
+    <section id="progress" class="progress hidden"><span></span><p></p></section>
+    <section class="summary"><div><strong id="count">0</strong><span>produits</span></div><div><strong id="review">0</strong><span>à vérifier</span></div><div><strong id="average">0%</strong><span>confiance moyenne</span></div></section>
+    <section class="table-wrap"><table><thead><tr><th><input id="all" type="checkbox"></th><th>Photo</th><th>Produit</th><th>Marque</th><th>Quantité</th><th>Prix promo</th><th>Ancien prix</th><th>Remise</th><th>Promotion</th><th>Page</th><th>Confiance</th><th>Statut</th></tr></thead><tbody id="rows"></tbody></table><div id="empty">Importez un catalogue pour commencer.</div></section>
+  </main>
+  <dialog id="preview"><button class="close">×</button><img><h3></h3></dialog>
+  <dialog id="exportDialog"><form method="dialog"><h2>Exporter les produits</h2><label>Format<select id="format"><option value="xlsx">Excel XLSX</option><option value="csv">CSV UTF-8</option></select></label><label class="check"><input id="photos" type="checkbox"> Inclure les photos</label><label>Lignes<select id="scope"><option value="all">Toutes les lignes</option><option value="validated">Validées uniquement</option><option value="selected">Sélection actuelle</option></select></label><div><button value="cancel" class="secondary">Annuler</button><button id="confirmExport" value="default">Créer l'export</button></div></form></dialog>
+  <script src="/app.js"></script>
+</body>
+</html>

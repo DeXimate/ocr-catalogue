@@ -1,0 +1,5 @@
+# Moteurs locaux optionnels pour les images scannées et l'analyse de mise en page.
+# Les modèles sont téléchargés au premier lancement du moteur concerné.
+paddleocr>=3.0,<4
+paddlepaddle>=3.0,<4
+opencv-python-headless>=4.10,<5
