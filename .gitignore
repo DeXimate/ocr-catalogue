@@ -4,4 +4,8 @@ data/jobs/
 data/test-output/
 .pytest_cache/
 */crops/
+*/pages/
+*/products/
 crops/
+pages/
+products/
