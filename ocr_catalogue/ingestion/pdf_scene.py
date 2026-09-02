@@ -199,11 +199,25 @@ def extract_document_scene(source: Path, raster_pages: list[Path]) -> DocumentSc
                     extracted = page.extract_words(use_text_flow=False, keep_blank_chars=False, extra_attrs=["fontname", "size"]) or []
                 except Exception:
                     extracted = page.extract_words(use_text_flow=False, keep_blank_chars=False) or []
+            # InDesign PDFs may retain objects from the neighbouring spread
+            # outside the CropBox. They are not visible on the rendered page
+            # and must never participate in offer association.
+            extracted = [
+                item for item in extracted
+                if 0 <= (float(item.get("x0", 0)) + float(item.get("x1", 0))) / 2 <= page.width
+                and 0 <= (float(item.get("top", 0)) + float(item.get("bottom", 0))) / 2 <= page.height
+            ]
             word_objects = _word_objects(page_index + 1, _dedupe_words(extracted))
             lines = _line_objects(page_index + 1, word_objects)
             median_height = statistics.median([obj.bbox.height for obj in word_objects]) if word_objects else 8.0
-            images = _image_objects(page_index + 1, page.images, page.width * page.height)
-            containers = _container_objects(page_index + 1, page, median_height)
+            images = [
+                obj for obj in _image_objects(page_index + 1, page.images, page.width * page.height)
+                if 0 <= obj.bbox.cx <= page.width and 0 <= obj.bbox.cy <= page.height
+            ]
+            containers = [
+                obj for obj in _container_objects(page_index + 1, page, median_height)
+                if 0 <= obj.bbox.cx <= page.width and 0 <= obj.bbox.cy <= page.height
+            ]
             raster = raster_pages[page_index]
             separators = _visual_separators(page_index + 1, raster, page.width, page.height)
             pages.append(PageScene(

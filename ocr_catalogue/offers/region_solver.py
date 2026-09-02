@@ -90,14 +90,15 @@ def _directional_neighbours(nuclei: dict[str, BBox]) -> dict[str, NeighbourMap]:
                 continue
             dx, dy = other.cx - core.cx, other.cy - core.cy
             distance = math.hypot(dx, dy)
-            if dx < 0 and abs(dx) >= abs(dy) * .55:
-                buckets["left"].append((distance + abs(dy) * .35, other_id))
-            if dx > 0 and abs(dx) >= abs(dy) * .55:
-                buckets["right"].append((distance + abs(dy) * .35, other_id))
-            if dy < 0 and abs(dy) >= abs(dx) * .55:
-                buckets["above"].append((distance + abs(dx) * .35, other_id))
-            if dy > 0 and abs(dy) >= abs(dx) * .55:
-                buckets["below"].append((distance + abs(dx) * .35, other_id))
+            # A diagonal neighbour belongs to its dominant direction only.
+            # Registering it on both axes creates artificial internal cuts
+            # (for example between the photo and the text of one offer).
+            if abs(dx) >= abs(dy):
+                direction = "left" if dx < 0 else "right"
+                buckets[direction].append((distance + abs(dy) * .35, other_id))
+            else:
+                direction = "above" if dy < 0 else "below"
+                buckets[direction].append((distance + abs(dx) * .35, other_id))
         result[offer_id] = NeighbourMap(**{
             direction: min(values)[1] if values else None for direction, values in buckets.items()
         })
@@ -191,7 +192,7 @@ class RasterEvidence:
         return float(np.percentile(border, 75)) > float(np.percentile(activity, 55))
 
 
-def _separator_between(page: PageScene, first: BBox, second: BBox, axis: str) -> float | None:
+def _separator_between(page: PageScene, first: BBox, second: BBox, axis: str, side: str) -> float | None:
     lo, hi = sorted((first.cx, second.cx)) if axis == "x" else sorted((first.cy, second.cy))
     orientation = "vertical" if axis == "x" else "horizontal"
     values = [
@@ -200,8 +201,17 @@ def _separator_between(page: PageScene, first: BBox, second: BBox, axis: str) ->
         if separator.metadata.get("orientation") == orientation
         and lo < (separator.bbox.cx if axis == "x" else separator.bbox.cy) < hi
     ]
-    midpoint = (lo + hi) / 2
-    return min(values, key=lambda value: abs(value - midpoint), default=None)
+    # Repeated product cards often contain a second whitespace band between
+    # their image and bottom caption. The true inter-card boundary is the
+    # first separator after the earlier semantic core, not necessarily the
+    # valley closest to the two centres' midpoint.
+    target = {
+        "left": second.x1,
+        "right": first.x1,
+        "above": second.bottom,
+        "below": first.bottom,
+    }[side]
+    return min(values, key=lambda value: abs(value - target), default=None)
 
 
 def _exclusive_container(page: PageScene, core: BBox, nuclei: dict[str, BBox], offer_id: str) -> BBox | None:
@@ -218,7 +228,7 @@ def _exclusive_container(page: PageScene, core: BBox, nuclei: dict[str, BBox], o
 
 
 def _boundary(page: PageScene, raster: RasterEvidence, current: BBox, other: BBox, axis: str, container: BBox | None, side: str) -> tuple[float, str]:
-    separator = _separator_between(page, current, other, axis)
+    separator = _separator_between(page, current, other, axis, side)
     if separator is not None:
         return separator, "separateur_visuel"
     if container is not None:
@@ -248,32 +258,10 @@ def _safe_region(page: PageScene, offer_id: str, core: BBox, nuclei: dict[str, B
     if container:
         bounds.update(left=container.x0, right=container.x1, above=container.top, below=container.bottom)
         evidence = {side: "conteneur_exclusif" for side in bounds}
-    # Full-page whitespace valleys remain useful when an adjacent offer was
-    # not recognized semantically. They are only used on sides without a
-    # detected neighbour; between known nuclei `_boundary` already arbitrates
-    # separators, containers and raster whitespace in priority order.
-    vertical = [separator.bbox for separator in page.separators if separator.metadata.get("orientation") == "vertical"]
-    horizontal = [separator.bbox for separator in page.separators if separator.metadata.get("orientation") == "horizontal"]
-    if neighbours.left is None:
-        candidates_left = [box for box in vertical if box.x1 <= core.x0]
-        if candidates_left:
-            barrier = max(candidates_left, key=lambda box: box.x1)
-            bounds["left"] = max(bounds["left"], barrier.x1); evidence["left"] = "vallee_blanche_page"
-    if neighbours.right is None:
-        candidates_right = [box for box in vertical if box.x0 >= core.x1]
-        if candidates_right:
-            barrier = min(candidates_right, key=lambda box: box.x0)
-            bounds["right"] = min(bounds["right"], barrier.x0); evidence["right"] = "vallee_blanche_page"
-    if neighbours.above is None:
-        candidates_above = [box for box in horizontal if box.bottom <= core.top]
-        if candidates_above:
-            barrier = max(candidates_above, key=lambda box: box.bottom)
-            bounds["above"] = max(bounds["above"], barrier.bottom); evidence["above"] = "vallee_blanche_page"
-    if neighbours.below is None:
-        candidates_below = [box for box in horizontal if box.top >= core.bottom]
-        if candidates_below:
-            barrier = min(candidates_below, key=lambda box: box.top)
-            bounds["below"] = min(bounds["below"], barrier.top); evidence["below"] = "vallee_blanche_page"
+    # A whitespace valley with no competing nucleus on the other side is not
+    # a boundary: repeated card layouts often contain a wide blank band
+    # between the packshot and its designation.  Such valleys are considered
+    # only when arbitrating two actual neighbouring offer nuclei below.
     for side, other_id in vars(neighbours).items():
         if not other_id:
             continue
@@ -330,10 +318,19 @@ def _visual_envelope(page: PageScene, candidate: OfferCandidate, core: BBox, saf
     for _ in range(8):
         previous = region
         updates = dict(left=region.x0, right=region.x1, above=region.top, below=region.bottom)
-        if region.x0 > safe.x0 and raster.border_activity(region, "left"): updates["left"] = safe.x0
-        if region.x1 < safe.x1 and raster.border_activity(region, "right"): updates["right"] = safe.x1
-        if region.top > safe.top and raster.border_activity(region, "top"): updates["above"] = safe.top
-        if region.bottom < safe.bottom and raster.border_activity(region, "bottom"): updates["below"] = safe.bottom
+        # Without an assigned visual object, a distant active band may be a
+        # page title rather than the product. Keep raster-only expansion local;
+        # embedded/assigned visuals may legitimately consume the full safe cell.
+        limit_x = max(12.0, core.width * 1.15)
+        limit_y = max(12.0, core.height * 1.65)
+        visual_support = any(
+            image.metadata.get("page_fraction", 1) < .04 and image.bbox.area >= core.area * .12
+            for image in image_objects
+        )
+        if region.x0 > safe.x0 and visual_support and region.x0 - safe.x0 <= limit_x and raster.border_activity(region, "left"): updates["left"] = safe.x0
+        if region.x1 < safe.x1 and visual_support and safe.x1 - region.x1 <= limit_x and raster.border_activity(region, "right"): updates["right"] = safe.x1
+        if region.top > safe.top and (visual_support or region.top - safe.top <= limit_y) and raster.border_activity(region, "top"): updates["above"] = safe.top
+        if region.bottom < safe.bottom and (visual_support or safe.bottom - region.bottom <= limit_y) and raster.border_activity(region, "bottom"): updates["below"] = safe.bottom
         region = BBox(updates["left"], updates["above"], updates["right"], updates["below"])
         if region == previous:
             break
@@ -390,6 +387,13 @@ def _resolve_page_conflicts(solutions: dict[str, RegionSolution]) -> None:
         for right_id in ids[index + 1:]:
             left, right = solutions[left_id], solutions[right_id]
             if not left.region.intersects(right.region):
+                continue
+            left_owns_foreign_core = left.region.contains_point(right.semantic_core.cx, right.semantic_core.cy)
+            right_owns_foreign_core = right.region.contains_point(left.semantic_core.cx, left.semantic_core.cy)
+            if not left_owns_foreign_core and not right_owns_foreign_core:
+                # Rectangular crops may overlap in background/packshot space
+                # on diagonal compositions. This is harmless as long as no
+                # region captures the competing offer nucleus.
                 continue
             dx, dy = right.semantic_core.cx - left.semantic_core.cx, right.semantic_core.cy - left.semantic_core.cy
             if abs(dx) >= abs(dy):
@@ -473,6 +477,14 @@ def solve_page_regions(page: PageScene, candidates: list[OfferCandidate]) -> dic
     for candidate in candidates:
         solution = solutions[candidate.id]
         solution.region = _visual_envelope(page, candidate, solution.semantic_core, solution.safe_region, objects, raster)
+        strong_boundaries = sum(
+            reason in {"separateur_visuel", "conteneur_exclusif", "header_footer"}
+            for reason in solution.boundary_evidence.values()
+        )
+        if strong_boundaries >= 3 and solution.safe_region.area <= page.width * page.height * .4:
+            # A card whose territory is confirmed on most sides is itself the
+            # offer region. Do not collapse it to its bottom caption.
+            solution.region = solution.safe_region
     # Page-level second pass: no two independent offers may own the same area.
     _resolve_page_conflicts(solutions)
     main_prices = _main_price_boxes(candidates, facts)

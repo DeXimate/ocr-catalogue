@@ -120,6 +120,7 @@ def _assign_objects(page: PageScene, graph: SpatialGraph, candidates: list[Offer
         by_candidate[candidate_id].object_ids.append(object_id)
         by_candidate[candidate_id].assignments[object_id] = score
         assigned.add(object_id)
+    _coalesce_product_blocks(page, graph, by_candidate, facts, candidates)
     _refine_context_assignments(page, graph, by_candidate, facts, candidates)
     _assign_images(page, by_candidate, facts, candidates)
     # Numeric facts other than main price are also globally exclusive.
@@ -141,23 +142,180 @@ def _assign_objects(page: PageScene, graph: SpatialGraph, candidates: list[Offer
         assigned_numeric.add(fact_id)
 
 
+def _coalesce_product_blocks(page: PageScene, graph: SpatialGraph, by_candidate: dict[str, OfferCandidate], facts: dict[str, NumericFact], candidates: list[OfferCandidate]) -> None:
+    """Keep consecutive bold designation lines attached to one offer nucleus."""
+    products = sorted(
+        (obj for obj in page.objects if obj.raw_type == "line" and obj.semantic_role == SemanticRole.PRODUCT_TEXT),
+        key=lambda obj: (obj.bbox.cy, obj.bbox.x0),
+    )
+    groups: list[list[VisualObject]] = []
+    for product in products:
+        owner = None
+        for group in reversed(groups[-10:]):
+            group_box = _union_boxes([item.bbox for item in group])
+            gap = max(product.bbox.top - group_box.bottom, group_box.top - product.bbox.bottom, 0)
+            overlap = max(0.0, min(product.bbox.x1, group_box.x1) - max(product.bbox.x0, group_box.x0))
+            aligned = abs(product.bbox.cx - group_box.cx) <= max(product.bbox.width, group_box.width) * .62
+            scale = max(product.font_size, max(item.font_size for item in group), 1.0)
+            similar_type = .72 <= product.font_size / max(1.0, max(item.font_size for item in group)) <= 1.38
+            if gap <= scale * 1.65 and similar_type and (overlap > 0 or aligned):
+                owner = group
+                break
+        if owner is None:
+            groups.append([product])
+        else:
+            owner.append(product)
+
+    for group in groups:
+        if len(group) < 2:
+            continue
+        group_ids = {item.id for item in group}
+        claims = []
+        for candidate in candidates:
+            main_ids = [fact_id for fact_id in candidate.numeric_ids if fact_id in facts and facts[fact_id].role == NumericRole.PRICE_MAIN]
+            graph_link = sum(max((graph.weight(item.id, fact_id) for fact_id in main_ids), default=0.0) for item in group)
+            if main_ids:
+                price_box = facts[main_ids[0]].bbox
+                row_link = math.exp(-abs(price_box.cy - _union_boxes([item.bbox for item in group]).cy) / max(18.0, page.height * .065))
+            else:
+                row_link = 0.0
+            existing = sum(candidate.assignments.get(item.id, 0.0) for item in group)
+            claims.append((graph_link + row_link * .45 + existing * .15, candidate))
+        score, owner = max(claims, key=lambda item: item[0])
+        if score <= 0:
+            continue
+        for candidate in candidates:
+            candidate.object_ids = [obj_id for obj_id in candidate.object_ids if obj_id not in group_ids]
+        for item in group:
+            owner.object_ids.append(item.id)
+            owner.assignments[item.id] = max(owner.assignments.get(item.id, 0.0), score / len(group))
+
+
 def _reassign_secondary_facts(page: PageScene, candidates: list[OfferCandidate]) -> None:
     """Assign badges/spec numbers only after independent safe territories exist."""
     facts = {fact.id: fact for fact in page.numeric_facts}
+    objects = page.object_by_id()
     secondary = [fact for fact in page.numeric_facts if fact.role != NumericRole.PRICE_MAIN]
+    cashback_labels = [
+        obj for obj in page.objects
+        if obj.raw_type == "line" and obj.semantic_role == SemanticRole.PROMOTION
+        and re.search(r"\b(?:cashback|vers[ée]s?)\b", obj.text, re.I)
+    ]
     for candidate in candidates:
         candidate.numeric_ids = [fact_id for fact_id in candidate.numeric_ids if fact_id in facts and facts[fact_id].role == NumericRole.PRICE_MAIN]
+        candidate.object_ids = [obj_id for obj_id in candidate.object_ids if obj_id not in {label.id for label in cashback_labels}]
     if not candidates:
         return
     provisional = infer_safe_regions(page, candidates)
     for fact in secondary:
+        eligible = list(provisional.values())
+        if fact.role == NumericRole.CASHBACK:
+            # A detached cashback badge must not be swallowed by a neighbouring
+            # offer which already has a complete, different mechanism such as
+            # 1+1 GRATUIT. This is a semantic contradiction, not a page rule.
+            without_other_mechanism = []
+            for solution in eligible:
+                candidate = next(item for item in candidates if item.id == solution.offer_id)
+                promotion_text = " ".join(
+                    objects[obj_id].text for obj_id in candidate.object_ids
+                    if obj_id in objects and objects[obj_id].semantic_role == SemanticRole.PROMOTION
+                    and objects[obj_id] not in cashback_labels
+                )
+                has_free_offer = bool(
+                    re.search(r"\b\d+\s*\+\s*\d+\b", promotion_text)
+                    and re.search(r"\bGRATUIT(?:E|ES|S)?\b", promotion_text, re.I)
+                )
+                has_second_item = bool(re.search(r"\bSUR\s+LE\s+\d", promotion_text, re.I))
+                if not (has_free_offer or has_second_item):
+                    without_other_mechanism.append(solution)
+            if without_other_mechanism:
+                eligible = without_other_mechanism
         containing = [
-            solution for solution in provisional.values()
+            solution for solution in eligible
             if solution.safe_region.contains_point(fact.bbox.cx, fact.bbox.cy)
         ]
-        pool = containing or list(provisional.values())
-        owner = min(pool, key=lambda solution: solution.semantic_core.distance(fact.bbox))
-        next(candidate for candidate in candidates if candidate.id == owner.offer_id).numeric_ids.append(fact.id)
+        # Cashback badges are often printed over the product photograph, far
+        # from the text nucleus. Overlapping inferred territories must not
+        # force them onto a nearer unpriced fragment (for example the model
+        # line) when the closest coherent priced OFFER is available.
+        pool = eligible if fact.role == NumericRole.CASHBACK else (containing or eligible)
+        priced_offer_ids = {
+            candidate.id for candidate in candidates
+            if any(
+                fact_id in facts and facts[fact_id].role == NumericRole.PRICE_MAIN
+                for fact_id in candidate.numeric_ids
+            )
+        }
+        def ownership_cost(solution: RegionSolution) -> float:
+            cost = solution.semantic_core.distance(fact.bbox)
+            if fact.role == NumericRole.CASHBACK and priced_offer_ids and solution.offer_id not in priced_offer_ids:
+                cost += max(12.0, math.hypot(page.width, page.height) * .035)
+            return cost
+        owner = min(pool, key=ownership_cost)
+        owner_candidate = next(candidate for candidate in candidates if candidate.id == owner.offer_id)
+        owner_candidate.numeric_ids.append(fact.id)
+        if fact.role == NumericRole.CASHBACK:
+            for label in cashback_labels:
+                if label.bbox.distance(fact.bbox) <= max(18.0, fact.bbox.height * 2.2, label.font_size * 4):
+                    owner_candidate.object_ids.append(label.id)
+                    owner_candidate.assignments[label.id] = 1.0
+
+
+def _merge_product_with_priced_brand(page: PageScene, candidates: list[OfferCandidate]) -> None:
+    """Join an orphan bold designation to its immediately aligned priced brand.
+
+    Catalogue typography often places the product category on one bold line
+    and the quoted brand directly below it. If graph seeding split those two
+    lines, preserve the priced OFFER and absorb the orphan designation only
+    under strong local typographic alignment.
+    """
+    objects = page.object_by_id()
+    facts = {fact.id: fact for fact in page.numeric_facts}
+    priced = [
+        candidate for candidate in candidates
+        if any(fact_id in facts and facts[fact_id].role == NumericRole.PRICE_MAIN for fact_id in candidate.numeric_ids)
+    ]
+    merged_ids: set[str] = set()
+    for source in list(candidates):
+        if source in priced:
+            continue
+        source_products = [
+            objects[obj_id] for obj_id in source.object_ids
+            if obj_id in objects and objects[obj_id].semantic_role == SemanticRole.PRODUCT_TEXT
+        ]
+        if not source_products:
+            continue
+        source_box = _union_boxes([obj.bbox for obj in source_products])
+        matches: list[tuple[float, OfferCandidate]] = []
+        for target in priced:
+            target_products = [
+                objects[obj_id] for obj_id in target.object_ids
+                if obj_id in objects and objects[obj_id].semantic_role == SemanticRole.PRODUCT_TEXT
+            ]
+            if target_products:
+                continue
+            for brand in (
+                objects[obj_id] for obj_id in target.object_ids
+                if obj_id in objects and objects[obj_id].semantic_role == SemanticRole.BRAND
+            ):
+                vertical_gap = max(source_box.top - brand.bbox.bottom, brand.bbox.top - source_box.bottom, 0.0)
+                overlap = max(0.0, min(source_box.x1, brand.bbox.x1) - max(source_box.x0, brand.bbox.x0))
+                overlap_ratio = overlap / max(1.0, min(source_box.width, brand.bbox.width))
+                type_scale = max(brand.font_size, max(obj.font_size for obj in source_products), 1.0)
+                size_ratio = max(obj.font_size for obj in source_products) / max(1.0, brand.font_size)
+                if vertical_gap <= type_scale * .75 and overlap_ratio >= .45 and .65 <= size_ratio <= 1.55:
+                    matches.append((vertical_gap + abs(source_box.cx - brand.bbox.cx) * .15, target))
+        if not matches:
+            continue
+        _, target = min(matches, key=lambda item: item[0])
+        for obj_id in source.object_ids:
+            if obj_id not in target.object_ids:
+                target.object_ids.append(obj_id)
+            target.assignments[obj_id] = max(target.assignments.get(obj_id, 0.0), source.assignments.get(obj_id, .75))
+        target.evidence.append("désignation_alignée_avec_marque_tarifée")
+        merged_ids.add(source.id)
+    if merged_ids:
+        candidates[:] = [candidate for candidate in candidates if candidate.id not in merged_ids]
 
 
 def _refine_context_assignments(page: PageScene, graph: SpatialGraph, by_candidate: dict[str, OfferCandidate], facts: dict[str, NumericFact], candidates: list[OfferCandidate]) -> None:
@@ -195,6 +353,22 @@ def _refine_context_assignments(page: PageScene, graph: SpatialGraph, by_candida
                 score = relational
             else:
                 score = max(relational * .9 + price_link * .1, price_link * .72)
+            if role == SemanticRole.PROMOTION and main_ids:
+                price_box = facts[main_ids[0]].bbox
+                horizontal_gap = max(price_box.x0 - objects[obj_id].bbox.x1, objects[obj_id].bbox.x0 - price_box.x1, 0)
+                vertical_gap = max(price_box.top - objects[obj_id].bbox.bottom, objects[obj_id].bbox.top - price_box.bottom, 0)
+                row_link = math.exp(-abs(price_box.cy - objects[obj_id].bbox.cy) / max(18.0, context_radius)) * math.exp(-horizontal_gap / max(36.0, page.width * .55))
+                column_link = math.exp(-abs(price_box.cx - objects[obj_id].bbox.cx) / max(18.0, context_radius)) * math.exp(-vertical_gap / max(36.0, page.height * .32))
+                score = max(score, max(row_link, column_link) * .78)
+                product_axis_links = []
+                for related_id in related:
+                    related_box = objects[related_id].bbox
+                    related_horizontal_gap = max(related_box.x0 - objects[obj_id].bbox.x1, objects[obj_id].bbox.x0 - related_box.x1, 0)
+                    related_vertical_gap = max(related_box.top - objects[obj_id].bbox.bottom, objects[obj_id].bbox.top - related_box.bottom, 0)
+                    same_row = math.exp(-abs(related_box.cy - objects[obj_id].bbox.cy) / max(18.0, context_radius)) * math.exp(-related_horizontal_gap / max(36.0, page.width * .55))
+                    same_column = math.exp(-abs(related_box.cx - objects[obj_id].bbox.cx) / max(18.0, context_radius)) * math.exp(-related_vertical_gap / max(36.0, page.height * .32))
+                    product_axis_links.append(max(same_row, same_column))
+                score = max(score, max(product_axis_links, default=0.0) * .95)
             claims.append((score, candidate))
         score, owner = max(claims, key=lambda item: item[0])
         if score >= .18:
@@ -282,6 +456,8 @@ def _pick_product(objects: list[VisualObject], price: NumericFact | None, style)
         font_match = 1.0 if obj.font_name in style.product_fonts else .55
         useful_length = 1.0 - min(1.0, abs(len(obj.text) - 20) / 80)
         noise = .7 if re.search(r"variétés|existe en|parfums|go[uû]ts au choix|photos", obj.text, re.I) else 0
+        if re.match(r"^\s*(?:ou|et|avec|pour|après|apres|\+)\b", obj.text, re.I):
+            noise += .55
         return .4 * obj.semantic_confidence + .3 * proximity + .15 * font_match + .15 * useful_length - noise
     primary = max(candidates, key=score)
     selected = [primary]
@@ -291,7 +467,8 @@ def _pick_product(objects: list[VisualObject], price: NumericFact | None, style)
         vertical_gap = max(obj.bbox.top - primary.bbox.bottom, primary.bbox.top - obj.bbox.bottom, 0)
         horizontal_overlap = max(0.0, min(obj.bbox.x1, primary.bbox.x1) - max(obj.bbox.x0, primary.bbox.x0))
         centres_close = abs(obj.bbox.cx - primary.bbox.cx) <= max(primary.bbox.width, obj.bbox.width) * .65
-        if vertical_gap <= max(primary.font_size, obj.font_size, style.body_font_size) * 1.5 and (horizontal_overlap > 0 or centres_close):
+        continuation = not re.match(r"^\s*(?:ou|et|avec|pour|après|apres|\+)\b", obj.text, re.I)
+        if continuation and vertical_gap <= max(primary.font_size, obj.font_size, style.body_font_size) * 1.5 and (horizontal_overlap > 0 or centres_close):
             selected.append(obj)
     return " ".join(dict.fromkeys(obj.text.strip() for obj in sorted(selected, key=lambda item: (item.bbox.cy, item.bbox.x0))))
 
@@ -629,6 +806,7 @@ def resolve_document_offers(document: DocumentScene) -> list[Offer]:
         graph = build_spatial_graph(page, document.style)
         candidates = _offer_candidates(page, graph)
         _assign_objects(page, graph, candidates)
+        _merge_product_with_priced_brand(page, candidates)
         _reassign_secondary_facts(page, candidates)
         region_solutions = solve_page_regions(page, candidates)
         page_offers = _assemble(page, candidates, graph, document.style, region_solutions)

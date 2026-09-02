@@ -18,12 +18,13 @@ def main() -> None:
 
     folder = storage.job_folder(args.job_id)
     job = storage.load_job(args.job_id)
+    job.pop("error", None)
     job.update(status="Traitement", progress=0)
     storage.save_job(args.job_id, job)
 
     products = extract(args.source, folder)
     job = storage.load_job(args.job_id)
-    job.update(status="Terminé", progress=100, products=[product.to_dict() for product in products])
+    job.update(status="Terminé", progress=100, products=[product.to_dict() for product in products], error="")
     storage.save_job(args.job_id, job)
 
     print(f"TOTAL {len(products)}")

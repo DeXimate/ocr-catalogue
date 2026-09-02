@@ -33,6 +33,22 @@ FREE_MECHANISM = re.compile(r"\b(?:GRATUIT(?:E|ES|S)?|OFFERT(?:E|ES|S)?)\b", re.
 CASHBACK_MECHANISM = re.compile(r"\b(?:CASHBACK|VERS[ÉE]S?)\b", re.I)
 OFFER_RATIO = re.compile(r"\b\d+\s*\+\s*\d+\b")
 SECOND_ITEM = re.compile(r"\bSUR\s+LE\s+\d(?:ER|E|ÈME|EME)?\b", re.I)
+EXPLICIT_FREE_ITEM = re.compile(
+    r"(?:^|\s)\+\s*(?:\d+\s+)?"
+    r"(?:[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’\-]{1,})(?:\s+[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’\-]{1,}){0,5}\s+"
+    r"(?:GRATUIT(?:E|ES|S)?|OFFERT(?:E|ES|S)?)\b",
+    re.I,
+)
+DONT_FREE_ITEM = re.compile(
+    r"\bDONT\s+\d+\s*(?:LITRES?|ML|CL|KG|G|PI[EÈ]CES?|UNIT[EÉ]S?|ARTICLES?|PRODUITS?)?\s+"
+    r"(?:GRATUIT(?:E|ES|S)?|OFFERT(?:E|ES|S)?)\b",
+    re.I,
+)
+FREE_QUANTITY = re.compile(
+    r"\b\d+(?:[,.]\d+)?\s*(?:LITRES?|ML|CL|KG|G|PI[EÈ]CES?|UNIT[EÉ]S?|ARTICLES?|PRODUITS?)\s+"
+    r"(?:GRATUIT(?:E|ES|S)?|OFFERT(?:E|ES|S)?)\b",
+    re.I,
+)
 TECHNICAL_COMPOSITION = re.compile(
     r"(?:\d+(?:[,.]\d+)?\s*[x×]\s*){2,}\d+(?:[,.]\d+)?\s*(?:cm|mm)\b|"
     r"\b\d+(?:[,.]\d+)?(?:\s*\+\s*\d+(?:[,.]\d+)?)+\s*(?:litres?|l|ml|cl|pi[eè]ces?)\b|"
@@ -107,8 +123,12 @@ def _find_prices(page: PageScene) -> list[NumericFact]:
             candidates.append(NumericFact(f"{head.id}-price", page.number, head.text, value, head.bbox, role, confidence, [head.id], evidence))
             continue
         embedded = re.match(r"^(\d{1,4})D+T+$", clean)
-        number = re.match(r"^(\d{1,4})$", clean)
+        number = re.match(r"^\+?(\d{1,4})$", clean)
         if not embedded and not number:
+            continue
+        if number and clean.startswith("+") and not CASHBACK_MECHANISM.search(_numeric_context(page, head.bbox)):
+            # A leading plus is a monetary head only inside an explicit
+            # cashback/"versés" badge. Elsewhere it remains ordinary text.
             continue
         amount = (embedded or number).group(1)
         # A number immediately followed by % is a discount badge, never a
@@ -132,9 +152,11 @@ def _find_prices(page: PageScene) -> list[NumericFact]:
                 continue
             tails = [item for item in decimal_tails if -max(currency.font_size, head.font_size) * 1.25 <= item[1].x0 - currency.bbox.x1 <= max(currency.font_size, head.font_size) * 2.3 and abs(item[1].cy - currency.bbox.cy) <= max(currency.font_size, head.font_size) * 1.8]
             if not tails:
-                if head.bbox.height >= max(18, currency.font_size * 2) and int(amount) >= 20:
-                    bbox = head.bbox
-                    role, confidence, evidence = _price_role(page, bbox)
+                bbox = head.bbox.union(currency.bbox)
+                role, confidence, evidence = _price_role(page, bbox)
+                if role == NumericRole.CASHBACK:
+                    candidates.append(NumericFact(f"{head.id}-{currency.id}-cashback", page.number, f"{head.text} DT", f"{int(amount)},000", bbox, role, confidence, [head.id, currency.id], evidence + ["milliemes_cashback_implicites"]))
+                elif head.bbox.height >= max(18, currency.font_size * 2) and int(amount) >= 20:
                     candidates.append(NumericFact(f"{head.id}-price", page.number, head.text, f"{int(amount)},000", bbox, role, confidence - .18, [head.id], evidence + ["milliemes_implicites"] ))
                 continue
             tail_text, tail_bbox, tail_ids, _ = min(tails, key=lambda item: abs(item[1].x0 - currency.bbox.x1) + abs(item[1].cy - currency.bbox.cy))
@@ -203,16 +225,35 @@ def _is_actual_promotion_line(page: PageScene, obj: VisualObject) -> bool:
         return False
     if CASHBACK_MECHANISM.search(text) or SECOND_ITEM.search(text):
         return True
-    if FREE_MECHANISM.search(text):
+    if _has_explicit_free_mechanism(text):
         return True
-    if OFFER_RATIO.search(text):
+    if FREE_MECHANISM.search(text) or OFFER_RATIO.search(text) or text.lstrip().startswith("+"):
         radius = max(18.0, obj.font_size * 4.0)
         return any(
-            other.id != obj.id and FREE_MECHANISM.search(other.text)
+            other.id != obj.id
+            and _has_explicit_free_mechanism(f"{text} {other.text.replace('ERFFO', 'OFFRE').strip()}")
             and other.bbox.distance(obj.bbox) <= radius
             for other in page.objects if other.raw_type == "line"
         )
     return False
+
+
+def _has_explicit_free_mechanism(text: str) -> bool:
+    """Require a complete commercial grammar, not merely an OCR fragment.
+
+    Words such as ``FF GRATUIT`` or ``+1 O gratuit`` are damaged snippets and
+    cannot establish what is offered. Split lines remain valid when their
+    combined text contains a ratio or a meaningful offered item.
+    """
+    normalized = re.sub(r"\s+", " ", text.replace("ERFFO", "OFFRE")).strip()
+    if not FREE_MECHANISM.search(normalized):
+        return False
+    return bool(
+        OFFER_RATIO.search(normalized)
+        or EXPLICIT_FREE_ITEM.search(normalized)
+        or DONT_FREE_ITEM.search(normalized)
+        or FREE_QUANTITY.search(normalized)
+    )
 
 
 def _classify_lines(page: PageScene) -> None:
@@ -224,7 +265,9 @@ def _classify_lines(page: PageScene) -> None:
         is_bold = bool(re.search(r"(?:bold|black|heavy|semi[- ]?bold|demi)", obj.font_name, re.I))
         if not text:
             continue
-        if NOISE_WORDS.search(text):
+        if obj.bbox.top >= page.height * .94 and obj.font_size <= median_size * .72:
+            obj.semantic_role, obj.semantic_confidence = SemanticRole.HEADER_FOOTER, .86
+        elif NOISE_WORDS.search(text):
             obj.semantic_role, obj.semantic_confidence = SemanticRole.HEADER_FOOTER, .7
         elif ARABIC.search(text) and not re.search(r"[A-Za-zÀ-ÿ]", text):
             obj.semantic_role, obj.semantic_confidence = SemanticRole.ARABIC_TEXT, .93
@@ -236,6 +279,10 @@ def _classify_lines(page: PageScene) -> None:
             obj.semantic_role, obj.semantic_confidence = SemanticRole.TECHNICAL_SPEC, .94
         elif _is_actual_promotion_line(page, obj):
             obj.semantic_role, obj.semantic_confidence = SemanticRole.PROMOTION, .9
+        elif FREE_MECHANISM.search(text):
+            # Keep incomplete OCR fragments out of both promotion and product
+            # fields. A bare/corrupted "gratuit" phrase names neither one.
+            obj.semantic_role, obj.semantic_confidence = SemanticRole.RAW_TEXT, .88
         elif re.search(r"[“\"]([^”\"]+)[”\"]", text):
             obj.semantic_role, obj.semantic_confidence = SemanticRole.BRAND, .94
         elif TECHNICAL_ONLY.search(text) or TECHNICAL_LABEL.search(text) or TECHNICAL.search(text):
@@ -264,9 +311,11 @@ def parse_promotion(objects: list[VisualObject], cashback: str = "") -> str:
     joined = " ".join(lines)
     if not joined:
         return ""
-    if TECHNICAL_COMPOSITION.search(joined) and not (FREE_MECHANISM.search(joined) or CASHBACK_MECHANISM.search(joined) or SECOND_ITEM.search(joined)):
+    if TECHNICAL_COMPOSITION.search(joined) and not (_has_explicit_free_mechanism(joined) or CASHBACK_MECHANISM.search(joined) or SECOND_ITEM.search(joined)):
         return ""
-    plus_item = re.search(r"\+\s*(\d+\s+)?([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s]{0,50}?)\s+(GRATUIT(?:E|ES|S)?|OFFERT(?:E|ES|S)?)\b", joined, re.I)
+    if not (CASHBACK_MECHANISM.search(joined) or SECOND_ITEM.search(joined) or _has_explicit_free_mechanism(joined)):
+        return ""
+    plus_item = re.search(r"\+\s*(\d+\s+)?([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’\-]{1,}(?:\s+[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’\-]{1,}){0,5})\s+(GRATUIT(?:E|ES|S)?|OFFERT(?:E|ES|S)?)\b", joined, re.I)
     if plus_item:
         count = plus_item.group(1) or ""
         item = re.sub(r"\s+", " ", plus_item.group(2)).strip()
@@ -280,7 +329,7 @@ def parse_promotion(objects: list[VisualObject], cashback: str = "") -> str:
         return f"{int(dont.group(1))} {(dont.group(2) or 'produit').lower()} gratuit"
     if SECOND_ITEM.search(joined):
         return " ".join(dict.fromkeys(line for line in lines if SECOND_ITEM.search(line) or re.search(r"%|r[ée]duction", line, re.I)))
-    if FREE_MECHANISM.search(joined):
+    if _has_explicit_free_mechanism(joined):
         return " ".join(dict.fromkeys(line for line in lines if FREE_MECHANISM.search(line)))
     return ""
 
