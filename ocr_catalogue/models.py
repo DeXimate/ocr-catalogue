@@ -27,6 +27,7 @@ class Product:
     selected: bool = False
     bbox: list[float] = field(default_factory=list)
     crop_mode: str = ""
+    region_quality: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

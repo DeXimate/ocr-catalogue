@@ -1,9 +1,10 @@
 import unittest
 
-from ocr_catalogue.domain import BBox, DocumentScene, NumericFact, NumericRole, Offer, PageScene, SemanticRole, VisualObject
+from ocr_catalogue.domain import BBox, DocumentScene, NumericFact, NumericRole, Offer, OfferCandidate, PageScene, SemanticRole, VisualObject
 from ocr_catalogue.graph import build_spatial_graph
 from ocr_catalogue.ingestion.pdf_scene import _collapse_overprint_word, _line_objects
-from ocr_catalogue.offers.resolver import _offer_bbox, _partition_container
+from ocr_catalogue.offers.resolver import _offer_bbox, _offer_candidates, _partition_container, _reassign_secondary_facts
+from ocr_catalogue.offers.region_solver import build_offer_nuclei, solve_page_regions
 from ocr_catalogue.pipeline import _to_product
 from ocr_catalogue.semantics.classifier import _classify_lines, _classify_non_price_numbers, _find_prices, parse_promotion
 from ocr_catalogue.style import infer_catalogue_style
@@ -83,6 +84,18 @@ class OfferEngineTests(unittest.TestCase):
         _classify_lines(page)
         self.assertTrue(all(line.semantic_role == SemanticRole.TECHNICAL_SPEC for line in lines))
 
+    def test_credit_and_appliance_specs_do_not_seed_products(self):
+        lines = [
+            VisualObject("duration", 1, "line", BBox(0, 0, 90, 12), text="18 mois 36 mois", font_size=10, font_name="Bold"),
+            VisualObject("programs", 1, "line", BBox(0, 20, 130, 32), text="13 COUVERTS 5 PROGRAMMES", font_size=10, font_name="Bold"),
+            VisualObject("temperature", 1, "line", BBox(0, 40, 100, 52), text="CHAUD/FROID", font_size=10, font_name="Bold"),
+            VisualObject("credit", 1, "line", BBox(0, 60, 120, 72), text="ACHAT À CRÉDIT", font_size=10, font_name="Bold"),
+            VisualObject("frost", 1, "line", BBox(0, 80, 120, 92), text="NO FROST INVERTER", font_size=10, font_name="Bold"),
+        ]
+        page = PageScene(1, 300, 500, lines)
+        _classify_lines(page)
+        self.assertTrue(all(line.semantic_role == SemanticRole.TECHNICAL_SPEC for line in lines))
+
     def test_classifier_accepts_only_explicit_free_mechanism(self):
         line = VisualObject("promo", 1, "line", BBox(0, 0, 100, 12), text="2+1 GRATUIT", font_size=10, font_name="Bold")
         page = PageScene(1, 300, 500, [line])
@@ -152,6 +165,89 @@ class OfferEngineTests(unittest.TestCase):
         self.assertLessEqual(region.bottom, footer.bbox.top)
         self.assertFalse(region.contains_point(left_price.bbox.cx, left_price.bbox.cy))
         self.assertFalse(region.contains_point(right_price.bbox.cx, right_price.bbox.cy))
+
+    def test_page_region_solver_is_complete_exclusive_and_respects_footer(self):
+        objects = []
+        facts = []
+        candidates = []
+        for index, centre in enumerate((50, 150, 250)):
+            product = VisualObject(
+                f"product-{index}", 1, "line", BBox(centre - 28, 35, centre + 28, 49),
+                text=f"Produit {index}", font_size=11,
+                semantic_role=SemanticRole.PRODUCT_TEXT, semantic_confidence=.95,
+            )
+            brand = VisualObject(
+                f"brand-{index}", 1, "line", BBox(centre - 20, 52, centre + 20, 63),
+                text=f"MARQUE {index}", font_size=9,
+                semantic_role=SemanticRole.BRAND, semantic_confidence=.9,
+            )
+            price = NumericFact(
+                f"price-{index}", 1, "9,990 DT", "9,990", BBox(centre - 18, 75, centre + 18, 104),
+                NumericRole.PRICE_MAIN, .96,
+            )
+            objects += [product, brand]
+            facts.append(price)
+            candidates.append(OfferCandidate(
+                f"offer-{index}", 1, [product.id, brand.id], [price.id], price.bbox, .95,
+            ))
+        objects += [
+            VisualObject("shared", 1, "image", BBox(0, 0, 300, 175), semantic_role=SemanticRole.IMAGE, metadata={"page_fraction": .35}),
+            VisualObject("footer", 1, "line", BBox(0, 180, 300, 198), text="Mentions légales", semantic_role=SemanticRole.HEADER_FOOTER),
+        ]
+        separators = [
+            VisualObject("sep-1", 1, "separator", BBox(99, 0, 101, 180), semantic_role=SemanticRole.SEPARATOR, metadata={"orientation": "vertical"}),
+            VisualObject("sep-2", 1, "separator", BBox(199, 0, 201, 180), semantic_role=SemanticRole.SEPARATOR, metadata={"orientation": "vertical"}),
+        ]
+        page = PageScene(1, 300, 240, objects, facts, separators)
+        nuclei = build_offer_nuclei(page, candidates)
+        solutions = solve_page_regions(page, candidates)
+        for candidate in candidates:
+            solution = solutions[candidate.id]
+            self.assertTrue(solution.region.contains(nuclei[candidate.id]))
+            self.assertLessEqual(solution.region.bottom, 180)
+            self.assertEqual(solution.quality["semantic_coverage"], 1.0)
+            self.assertEqual(solution.quality["competing_price_centres"], 0)
+            self.assertFalse(solution.quality["crosses_header_footer"])
+        for index, candidate in enumerate(candidates):
+            for other_index, price in enumerate(facts):
+                if index != other_index:
+                    self.assertFalse(solutions[candidate.id].region.contains_point(price.bbox.cx, price.bbox.cy))
+        self.assertFalse(solutions["offer-0"].region.intersects(solutions["offer-1"].region))
+        self.assertFalse(solutions["offer-1"].region.intersects(solutions["offer-2"].region))
+
+    def test_unpriced_product_nuclei_survive_when_another_price_exists(self):
+        priced = VisualObject("priced", 1, "line", BBox(10, 10, 70, 24), text="Produit vendu", semantic_role=SemanticRole.PRODUCT_TEXT, semantic_confidence=.9)
+        unpriced = VisualObject("unpriced", 1, "line", BBox(210, 210, 280, 224), text="Produit sans prix", semantic_role=SemanticRole.PRODUCT_TEXT, semantic_confidence=.9)
+        price = NumericFact("price", 1, "9,990 DT", "9,990", BBox(18, 35, 58, 65), NumericRole.PRICE_MAIN, .95)
+        page = PageScene(1, 300, 300, [priced, unpriced], [price])
+        graph = build_spatial_graph(page, type("Style", (), {"body_font_size": 10})())
+        candidates = _offer_candidates(page, graph)
+        self.assertTrue(any(candidate.numeric_ids == [price.id] for candidate in candidates))
+        self.assertTrue(any(candidate.object_ids == [unpriced.id] and "prix_principal_absent" in candidate.contradictions for candidate in candidates))
+
+    def test_percentage_badge_is_reassigned_inside_its_offer_territory(self):
+        left_product = VisualObject(
+            "left-product", 1, "line", BBox(20, 80, 75, 94), text="Produit gauche",
+            semantic_role=SemanticRole.PRODUCT_TEXT, semantic_confidence=.95,
+        )
+        right_product = VisualObject(
+            "right-product", 1, "line", BBox(125, 80, 180, 94), text="Produit droite",
+            semantic_role=SemanticRole.PRODUCT_TEXT, semantic_confidence=.95,
+        )
+        left_price = NumericFact("left-price", 1, "9,990 DT", "9,990", BBox(28, 105, 62, 132), NumericRole.PRICE_MAIN, .95)
+        right_price = NumericFact("right-price", 1, "8,990 DT", "8,990", BBox(138, 105, 172, 132), NumericRole.PRICE_MAIN, .95)
+        left_discount = NumericFact("left-discount", 1, "32 %", "32", BBox(70, 102, 92, 127), NumericRole.DISCOUNT, .9)
+        page = PageScene(1, 200, 220, [left_product, right_product], [left_price, right_price, left_discount])
+        candidates = [
+            OfferCandidate("left", 1, [left_product.id], [left_price.id], left_price.bbox, .9),
+            # Simulate a bad first graph assignment: the left badge belongs to the right offer.
+            OfferCandidate("right", 1, [right_product.id], [right_price.id, left_discount.id], right_price.bbox, .9),
+        ]
+
+        _reassign_secondary_facts(page, candidates)
+
+        self.assertIn(left_discount.id, candidates[0].numeric_ids)
+        self.assertNotIn(left_discount.id, candidates[1].numeric_ids)
 
     def test_catalogue_style_is_recomputed_from_document(self):
         pages = []

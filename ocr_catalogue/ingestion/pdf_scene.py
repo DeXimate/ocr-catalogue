@@ -145,11 +145,14 @@ def _container_objects(page_number: int, page, word_height: float) -> list[Visua
     return result
 
 
-def _low_activity_runs(values: np.ndarray, min_run: int) -> list[tuple[int, int]]:
-    if values.size == 0:
+def _whitespace_runs(activity: np.ndarray, brightness: np.ndarray, min_run: int) -> list[tuple[int, int]]:
+    if activity.size == 0:
         return []
-    threshold = float(np.percentile(values, 18))
-    mask = values <= threshold
+    activity_threshold = float(np.percentile(activity, 28))
+    # Use the catalogue's own background distribution. This rejects flat
+    # coloured artwork: uniformity alone is not whitespace.
+    brightness_threshold = float(np.percentile(brightness, 68))
+    mask = (activity <= activity_threshold) & (brightness >= brightness_threshold)
     runs = []
     start = None
     for index, active in enumerate(mask.tolist() + [False]):
@@ -168,8 +171,8 @@ def _visual_separators(page_number: int, raster_path: Path, width: float, height
     array = np.asarray(image, dtype=np.float32)
     dx = np.abs(np.diff(array, axis=1, prepend=array[:, :1])).mean(axis=0)
     dy = np.abs(np.diff(array, axis=0, prepend=array[:1, :])).mean(axis=1)
-    vertical = _low_activity_runs(dx, max(2, round(array.shape[1] * .004)))
-    horizontal = _low_activity_runs(dy, max(2, round(array.shape[0] * .004)))
+    vertical = _whitespace_runs(dx, array.mean(axis=0), max(2, round(array.shape[1] * .004)))
+    horizontal = _whitespace_runs(dy, array.mean(axis=1), max(2, round(array.shape[0] * .004)))
     sx, sy = width / array.shape[1], height / array.shape[0]
     result = []
     for index, (start, end) in enumerate(vertical):

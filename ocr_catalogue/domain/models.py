@@ -200,3 +200,5 @@ class Offer:
     contradictions: list[str] = field(default_factory=list)
     review_reasons: list[str] = field(default_factory=list)
     crop_mode: str = "offer_graph"
+    safe_bbox: list[float] = field(default_factory=list)
+    region_quality: dict[str, Any] = field(default_factory=dict)

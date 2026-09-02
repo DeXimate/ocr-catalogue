@@ -9,6 +9,7 @@ from collections import defaultdict
 from ..domain import BBox, DocumentScene, NumericFact, NumericRole, Offer, OfferCandidate, PageScene, SemanticRole, VisualObject
 from ..graph import SpatialGraph, build_spatial_graph
 from ..semantics import parse_promotion
+from .region_solver import RegionSolution, infer_safe_regions, solve_page_regions
 
 
 def _candidate_score(graph: SpatialGraph, seed_id: str, obj_id: str) -> float:
@@ -23,14 +24,68 @@ def _offer_candidates(page: PageScene, graph: SpatialGraph) -> list[OfferCandida
     # A strong product cluster without a plausible price remains visible for
     # review instead of disappearing merely because price OCR failed.
     strong_products = [obj for obj in page.objects if obj.semantic_role == SemanticRole.PRODUCT_TEXT and obj.semantic_confidence >= .64]
-    for product in strong_products if not main_prices else []:
-        if candidates and max((_candidate_score(graph, fact.id, product.id) for fact in main_prices), default=0) >= .24:
+    product_sizes = [obj.font_size for obj in strong_products if obj.font_size > 0]
+    median_product_size = statistics.median(product_sizes) if product_sizes else 0
+    def viable_seed(obj: VisualObject) -> bool:
+        letters = re.sub(r"[^A-Za-zÀ-ÿ]", "", obj.text)
+        words = re.findall(r"[A-Za-zÀ-ÿ]+", obj.text)
+        all_caps = bool(letters) and letters == letters.upper()
+        if all_caps and len(words) >= 2:
+            return False
+        if all_caps and median_product_size and obj.font_size > median_product_size * 1.35:
+            return False
+        if obj.bbox.width > page.width * .55:
+            return False
+        return True
+    strong_products = [obj for obj in strong_products if viable_seed(obj)]
+    # Product designations frequently span two or three bold lines. Build one
+    # nucleus per local text block instead of turning every line fragment into
+    # an independent offer.
+    product_groups: list[list[VisualObject]] = []
+    for product in sorted(strong_products, key=lambda item: (item.bbox.cy, item.bbox.x0)):
+        owner = None
+        for group in reversed(product_groups[-12:]):
+            group_box = group[0].bbox
+            for member in group[1:]: group_box = group_box.union(member.bbox)
+            vertical_gap = max(product.bbox.top - group_box.bottom, group_box.top - product.bbox.bottom, 0)
+            overlap_x = max(0.0, min(product.bbox.x1, group_box.x1) - max(product.bbox.x0, group_box.x0))
+            aligned = abs(product.bbox.cx - group_box.cx) <= max(product.bbox.width, group_box.width) * .68
+            scale = max(product.font_size, max(item.font_size for item in group), 1.0)
+            if vertical_gap <= scale * 1.8 and (overlap_x > 0 or aligned):
+                owner = group
+                break
+        if owner is None: product_groups.append([product])
+        else: owner.append(product)
+    # A price may strongly see several names on a dense page. Only its best
+    # product nucleus is absorbed by the price-seeded candidate; all other
+    # reliable product nuclei survive as independent offers for review.
+    best_group_for_price: dict[str, int] = {}
+    for fact in main_prices:
+        ranked = [
+            (max(_candidate_score(graph, fact.id, product.id) for product in group), index)
+            for index, group in enumerate(product_groups)
+        ]
+        if ranked:
+            score, group_index = max(ranked)
+            if score >= .24:
+                best_group_for_price[fact.id] = group_index
+    price_owned_groups = set(best_group_for_price.values())
+    for group_index, group in enumerate(product_groups):
+        if group_index in price_owned_groups:
             continue
+        group_box = _union_boxes([product.bbox for product in group])
+        representative = max(group, key=lambda product: (product.semantic_confidence, product.font_size, product.bbox.area))
         candidates.append(OfferCandidate(
-            id=f"offer-{product.id}", page=page.number, object_ids=[product.id], bbox=product.bbox,
-            score=product.semantic_confidence * .55, evidence=["designation_sans_prix_fiable"], contradictions=["prix_principal_absent"],
+            id=f"offer-{representative.id}", page=page.number, object_ids=[product.id for product in group], bbox=group_box,
+            score=representative.semantic_confidence * .55, evidence=["designation_sans_prix_fiable"], contradictions=["prix_principal_absent"],
         ))
     return candidates
+
+
+def _union_boxes(boxes: list[BBox]) -> BBox:
+    result = boxes[0]
+    for box in boxes[1:]: result = result.union(box)
+    return result
 
 
 def _assign_objects(page: PageScene, graph: SpatialGraph, candidates: list[OfferCandidate]) -> None:
@@ -84,6 +139,25 @@ def _assign_objects(page: PageScene, graph: SpatialGraph, candidates: list[Offer
             continue
         by_candidate[candidate_id].numeric_ids.append(fact_id)
         assigned_numeric.add(fact_id)
+
+
+def _reassign_secondary_facts(page: PageScene, candidates: list[OfferCandidate]) -> None:
+    """Assign badges/spec numbers only after independent safe territories exist."""
+    facts = {fact.id: fact for fact in page.numeric_facts}
+    secondary = [fact for fact in page.numeric_facts if fact.role != NumericRole.PRICE_MAIN]
+    for candidate in candidates:
+        candidate.numeric_ids = [fact_id for fact_id in candidate.numeric_ids if fact_id in facts and facts[fact_id].role == NumericRole.PRICE_MAIN]
+    if not candidates:
+        return
+    provisional = infer_safe_regions(page, candidates)
+    for fact in secondary:
+        containing = [
+            solution for solution in provisional.values()
+            if solution.safe_region.contains_point(fact.bbox.cx, fact.bbox.cy)
+        ]
+        pool = containing or list(provisional.values())
+        owner = min(pool, key=lambda solution: solution.semantic_core.distance(fact.bbox))
+        next(candidate for candidate in candidates if candidate.id == owner.offer_id).numeric_ids.append(fact.id)
 
 
 def _refine_context_assignments(page: PageScene, graph: SpatialGraph, by_candidate: dict[str, OfferCandidate], facts: dict[str, NumericFact], candidates: list[OfferCandidate]) -> None:
@@ -500,23 +574,9 @@ def _contamination(region: BBox, own: set[str], page: PageScene, assignment_owne
     return foreign_area / max(1.0, own_area + foreign_area)
 
 
-def _assemble(page: PageScene, candidates: list[OfferCandidate], graph: SpatialGraph, style) -> list[Offer]:
+def _assemble(page: PageScene, candidates: list[OfferCandidate], graph: SpatialGraph, style, region_solutions: dict[str, RegionSolution]) -> list[Offer]:
     object_map = page.object_by_id()
     fact_map = {fact.id: fact for fact in page.numeric_facts}
-    preliminary: dict[str, BBox] = {}
-    for candidate in candidates:
-        main_boxes = [fact_map[fact].bbox for fact in candidate.numeric_ids if fact in fact_map and fact_map[fact].role == NumericRole.PRICE_MAIN]
-        semantic_boxes = [
-            object_map[obj].bbox for obj in candidate.object_ids
-            if obj in object_map and object_map[obj].semantic_role in {SemanticRole.PRODUCT_TEXT, SemanticRole.BRAND, SemanticRole.QUANTITY}
-        ]
-        boxes = main_boxes or semantic_boxes
-        if not boxes:
-            boxes = [candidate.bbox] if candidate.bbox else []
-        if boxes:
-            core = boxes[0]
-            for box in boxes[1:]: core = core.union(box)
-            preliminary[candidate.id] = core
     assignment_owner = {obj_id: candidate.id for candidate in candidates for obj_id in candidate.object_ids}
     offers = []
     for candidate in candidates:
@@ -533,7 +593,8 @@ def _assemble(page: PageScene, candidates: list[OfferCandidate], graph: SpatialG
         percentage = next((fact for fact in facts if fact.role == NumericRole.DISCOUNT), None)
         credit = next((fact for fact in facts if fact.role == NumericRole.CREDIT_PAYMENT), None)
         basis_obj = next((obj for obj in objects if obj.semantic_role == SemanticRole.PRICE_BASIS), None)
-        region, crop_mode = _offer_bbox(page, candidate, objects, facts, preliminary)
+        solution = region_solutions[candidate.id]
+        region, crop_mode = solution.region, "iterative_region_solver"
         contamination = _contamination(region, set(candidate.object_ids), page, assignment_owner)
         components = [main.confidence if main else .25, .92 if product else .3, max(.15, 1 - contamination)]
         if brands: components.append(.86)
@@ -542,7 +603,8 @@ def _assemble(page: PageScene, candidates: list[OfferCandidate], graph: SpatialG
         review = []
         if not product: review.append("désignation absente")
         if not main: review.append("prix principal absent")
-        if contamination > .12: review.append("contamination avec une offre voisine")
+        if contamination > .12 or solution.quality.get("foreign_offer_contamination", 0) >= .5: review.append("contamination avec une offre voisine")
+        if not solution.quality.get("accepted", False): review.append("région d’offre à contrôler")
         if region.width < page.width * .04 or region.height < page.height * .045: review.append("limites d’offre instables")
         offers.append(Offer(
             id=uuid.uuid4().hex[:10], page=page.number, bbox=region,
@@ -556,6 +618,7 @@ def _assemble(page: PageScene, candidates: list[OfferCandidate], graph: SpatialG
             credit_payment=(credit.value + " DT") if credit else "", technical_specs=technical,
             confidence=confidence, evidence=candidate.evidence, contradictions=contradictions,
             review_reasons=review, crop_mode=crop_mode,
+            safe_bbox=solution.safe_region.as_list(), region_quality=solution.quality,
         ))
     return offers
 
@@ -566,7 +629,9 @@ def resolve_document_offers(document: DocumentScene) -> list[Offer]:
         graph = build_spatial_graph(page, document.style)
         candidates = _offer_candidates(page, graph)
         _assign_objects(page, graph, candidates)
-        page_offers = _assemble(page, candidates, graph, document.style)
+        _reassign_secondary_facts(page, candidates)
+        region_solutions = solve_page_regions(page, candidates)
+        page_offers = _assemble(page, candidates, graph, document.style, region_solutions)
         # Reject isolated numeric ornaments and folio fragments.  The minimum
         # viable region is learned from the catalogue body type size, so this
         # remains independent of page dimensions and catalogue coordinates.

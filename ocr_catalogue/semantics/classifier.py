@@ -17,6 +17,17 @@ QUANTITY = re.compile(
     r"\b(?:le\s+blister\s+de|les)\s+\d+\b", re.I,
 )
 TECHNICAL = re.compile(r"\b\d+(?:[,.]\d+)?\s*(?:watts?|w|btu|tours?|hz|v|usb|cm|mm|pouces?)\b|\bgarantie\s+\d+\s*(?:ans?|mois)\b", re.I)
+TECHNICAL_ONLY = re.compile(
+    r"^\s*(?:\d+\s*(?:mois|ans?)\s*)+$|"
+    r"^\s*(?:\d+\s*(?:couverts?|programmes?)\s*)+$|"
+    r"^\s*chaud\s*/\s*froid\s*$",
+    re.I,
+)
+TECHNICAL_LABEL = re.compile(
+    r"\bachat\s+[àa]\s+cr[ée]dit\b|"
+    r"^\s*(?:(?:no\s+)?frost|inverter|chaud\s*/\s*froid)(?:\s+(?:(?:no\s+)?frost|inverter|chaud\s*/\s*froid|\d+\s*litres?))*\s*$",
+    re.I,
+)
 MODEL = re.compile(r"\b(?=[A-Z0-9-]{3,}\b)(?=[A-Z0-9-]*[A-Z])(?=[A-Z0-9-]*\d)[A-Z0-9-]+\b")
 FREE_MECHANISM = re.compile(r"\b(?:GRATUIT(?:E|ES|S)?|OFFERT(?:E|ES|S)?)\b", re.I)
 CASHBACK_MECHANISM = re.compile(r"\b(?:CASHBACK|VERS[ÉE]S?)\b", re.I)
@@ -63,8 +74,7 @@ def _price_role(page: PageScene, bbox: BBox) -> tuple[NumericRole, float, list[s
     )
     if plus_near and re.search(r"VERS[ÉE]S?", context, re.I):
         return NumericRole.CASHBACK, .96, ["voisinage_verses"]
-    body_size = statistics.median([obj.font_size for obj in page.objects if obj.raw_type == "word" and obj.font_size > 0] or [8.0])
-    if re.search(r"ACHAT\s+[ÀA]\s+CR[ÉE]DIT", context, re.I) and re.search(r"\bmois\b", context, re.I) and bbox.height <= body_size * 2.5:
+    if re.search(r"ACHAT\s+[ÀA]\s+CR[ÉE]DIT", context, re.I) and re.search(r"\bmois\b", context, re.I):
         return NumericRole.CREDIT_PAYMENT, .92, ["voisinage_credit"]
     if _preceded_by_reference_cue(page, bbox):
         return NumericRole.TECHNICAL_SPEC, .9, ["prix_variante_non_exporte"]
@@ -228,7 +238,7 @@ def _classify_lines(page: PageScene) -> None:
             obj.semantic_role, obj.semantic_confidence = SemanticRole.PROMOTION, .9
         elif re.search(r"[“\"]([^”\"]+)[”\"]", text):
             obj.semantic_role, obj.semantic_confidence = SemanticRole.BRAND, .94
-        elif TECHNICAL.search(text):
+        elif TECHNICAL_ONLY.search(text) or TECHNICAL_LABEL.search(text) or TECHNICAL.search(text):
             obj.semantic_role, obj.semantic_confidence = SemanticRole.TECHNICAL_SPEC, .9
         elif QUANTITY.search(text):
             obj.semantic_role, obj.semantic_confidence = SemanticRole.QUANTITY, .9
