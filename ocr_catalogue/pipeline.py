@@ -114,7 +114,7 @@ def extract_offers(source: Path, folder: Path, raster_pages: list[Path], progres
             progress(offer.page, len(document.pages))
     diagnostic_images = _write_diagnostic_contact_sheets(products, folder)
     audit = {
-        "engine": "offer-region-v2",
+        "engine": "offer-region-v3-native-panels",
         "style": asdict(document.style),
         "offers": [asdict(offer) for offer in offers],
         "pages": [
@@ -129,6 +129,7 @@ def extract_offers(source: Path, folder: Path, raster_pages: list[Path], progres
                         "product": offer.product_name,
                         "region": offer.bbox.as_list(),
                         "safe_region": offer.safe_bbox,
+                        "crop_mode": offer.crop_mode,
                         "quality": offer.region_quality,
                     }
                     for offer in offers if offer.page == page.number

@@ -15,6 +15,7 @@ import numpy as np
 from PIL import Image
 
 from ..domain import BBox, NumericFact, NumericRole, OfferCandidate, PageScene, SemanticRole, VisualObject
+from .panel_detector import detect_native_panels
 
 
 CORE_SEMANTIC_ROLES = {
@@ -51,6 +52,9 @@ class RegionSolution:
     neighbours: NeighbourMap = field(default_factory=NeighbourMap)
     boundary_evidence: dict[str, str] = field(default_factory=dict)
     quality: dict[str, object] = field(default_factory=dict)
+    mode: str = "free_layout"
+    native_panel_bbox: list[float] = field(default_factory=list)
+    panel_confidence: float = 0.0
 
 
 def _union(boxes: Iterable[BBox], fallback: BBox) -> BBox:
@@ -350,11 +354,17 @@ def _quality(page: PageScene, candidate: OfferCandidate, solution: RegionSolutio
     covered = sum(solution.region.contains(box, .5) for box in semantic_boxes)
     semantic_coverage = covered / max(1, len(semantic_boxes))
     foreign_nuclei, competing_prices = _foreign_counts(solution.region, candidate.id, nuclei, main_prices)
-    border_contact = {
-        side: raster.border_activity(solution.region, side) and abs(getattr(solution.region, {"left":"x0","right":"x1","top":"top","bottom":"bottom"}[side]) - getattr(solution.safe_region, {"left":"x0","right":"x1","top":"top","bottom":"bottom"}[side])) > 1e-3
-        for side in ("left", "right", "top", "bottom")
-    }
-    visual_completeness = 1.0 - sum(border_contact.values()) / 4
+    if solution.mode == "panel_native":
+        # Active pixels on a true card border are expected and must not be
+        # interpreted as an incomplete crop.
+        border_contact = {side: False for side in ("left", "right", "top", "bottom")}
+        visual_completeness = 1.0
+    else:
+        border_contact = {
+            side: raster.border_activity(solution.region, side) and abs(getattr(solution.region, {"left":"x0","right":"x1","top":"top","bottom":"bottom"}[side]) - getattr(solution.safe_region, {"left":"x0","right":"x1","top":"top","bottom":"bottom"}[side])) > 1e-3
+            for side in ("left", "right", "top", "bottom")
+        }
+        visual_completeness = 1.0 - sum(border_contact.values()) / 4
     contamination = min(1.0, foreign_nuclei * .55 + competing_prices * .75)
     accepted = semantic_coverage >= .999 and visual_completeness >= .75 and contamination < .5 and competing_prices == 0
     return {
@@ -370,6 +380,9 @@ def _quality(page: PageScene, candidate: OfferCandidate, solution: RegionSolutio
         "border_contact": border_contact,
         "crosses_header_footer": any(obj.semantic_role == SemanticRole.HEADER_FOOTER and solution.region.intersects(obj.bbox) for obj in page.objects),
         "accepted": accepted,
+        "crop_mode": solution.mode,
+        "native_panel_bbox": solution.native_panel_bbox,
+        "panel_confidence": round(solution.panel_confidence, 4),
     }
 
 
@@ -474,20 +487,36 @@ def solve_page_regions(page: PageScene, candidates: list[OfferCandidate]) -> dic
     solutions = infer_safe_regions(page, candidates)
     nuclei = {offer_id: solution.semantic_core for offer_id, solution in solutions.items()}
     raster = RasterEvidence(page)
+    main_prices = _main_price_boxes(candidates, facts)
+    native_panels = detect_native_panels(page, candidates, nuclei, main_prices)
     for candidate in candidates:
         solution = solutions[candidate.id]
-        solution.region = _visual_envelope(page, candidate, solution.semantic_core, solution.safe_region, objects, raster)
-        strong_boundaries = sum(
-            reason in {"separateur_visuel", "conteneur_exclusif", "header_footer"}
-            for reason in solution.boundary_evidence.values()
-        )
-        if strong_boundaries >= 3 and solution.safe_region.area <= page.width * page.height * .4:
-            # A card whose territory is confirmed on most sides is itself the
-            # offer region. Do not collapse it to its bottom caption.
-            solution.region = solution.safe_region
+        native = native_panels.get(candidate.id)
+        if native is not None:
+            # PDF-native geometry is the strongest boundary signal available.
+            # Crop the rendered page using this bbox; do not export the XObject
+            # itself because text/price/badges may live on separate PDF layers.
+            solution.region = native.bbox.clip(page.width, page.height)
+            solution.safe_region = solution.region
+            solution.mode = "panel_native"
+            solution.native_panel_bbox = native.bbox.as_list()
+            solution.panel_confidence = native.confidence
+            solution.boundary_evidence = {
+                side: "panneau_natif"
+                for side in ("left", "right", "above", "below")
+            }
+        else:
+            # Only pages/offers without a proven native panel use the inferred
+            # FREE_LAYOUT solver.
+            solution.region = _visual_envelope(page, candidate, solution.semantic_core, solution.safe_region, objects, raster)
+            strong_boundaries = sum(
+                reason in {"separateur_visuel", "conteneur_exclusif", "header_footer"}
+                for reason in solution.boundary_evidence.values()
+            )
+            if strong_boundaries >= 3 and solution.safe_region.area <= page.width * page.height * .4:
+                solution.region = solution.safe_region
     # Page-level second pass: no two independent offers may own the same area.
     _resolve_page_conflicts(solutions)
-    main_prices = _main_price_boxes(candidates, facts)
     _enforce_exclusivity(page, solutions, nuclei, main_prices)
     _resolve_page_conflicts(solutions)
     for candidate in candidates:

@@ -3,6 +3,7 @@ import unittest
 from ocr_catalogue.domain import BBox, DocumentScene, NumericFact, NumericRole, Offer, OfferCandidate, PageScene, SemanticRole, VisualObject
 from ocr_catalogue.graph import build_spatial_graph
 from ocr_catalogue.ingestion.pdf_scene import _collapse_overprint_word, _line_objects
+from ocr_catalogue.offers.panel_detector import detect_native_panels
 from ocr_catalogue.offers.resolver import _merge_product_with_priced_brand, _offer_bbox, _offer_candidates, _partition_container, _pick_product, _reassign_secondary_facts
 from ocr_catalogue.offers.region_solver import build_offer_nuclei, solve_page_regions
 from ocr_catalogue.pipeline import _to_product
@@ -191,6 +192,81 @@ class OfferEngineTests(unittest.TestCase):
         container = BBox(0, 0, 300, 300)
         result = _partition_container(container, (150, 150), [(50, 50)])
         self.assertEqual(result, container)
+
+    def test_native_panel_detector_uses_exclusive_pdf_card(self):
+        left_product = VisualObject(
+            "left-product", 1, "line", BBox(15, 25, 80, 40),
+            text="Tabouret", semantic_role=SemanticRole.PRODUCT_TEXT,
+            semantic_confidence=.95,
+        )
+        right_product = VisualObject(
+            "right-product", 1, "line", BBox(115, 25, 180, 40),
+            text="Parasol", semantic_role=SemanticRole.PRODUCT_TEXT,
+            semantic_confidence=.95,
+        )
+        left_price = NumericFact(
+            "left-price", 1, "16,900 DT", "16,900",
+            BBox(55, 70, 88, 96), NumericRole.PRICE_MAIN, .96,
+        )
+        right_price = NumericFact(
+            "right-price", 1, "89,900 DT", "89,900",
+            BBox(155, 70, 188, 96), NumericRole.PRICE_MAIN, .96,
+        )
+        left_card = VisualObject(
+            "left-card", 1, "container", BBox(5, 5, 98, 110),
+            semantic_role=SemanticRole.CONTAINER,
+        )
+        right_card = VisualObject(
+            "right-card", 1, "container", BBox(102, 5, 195, 110),
+            semantic_role=SemanticRole.CONTAINER,
+        )
+        page = PageScene(
+            1, 200, 130,
+            [left_product, right_product, left_card, right_card],
+            [left_price, right_price],
+        )
+        candidates = [
+            OfferCandidate("left", 1, [left_product.id], [left_price.id], left_price.bbox, .95),
+            OfferCandidate("right", 1, [right_product.id], [right_price.id], right_price.bbox, .95),
+        ]
+        nuclei = build_offer_nuclei(page, candidates)
+        panels = detect_native_panels(
+            page,
+            candidates,
+            nuclei,
+            {"left": left_price.bbox, "right": right_price.bbox},
+        )
+
+        self.assertEqual(panels["left"].bbox, left_card.bbox)
+        self.assertEqual(panels["right"].bbox, right_card.bbox)
+
+        solutions = solve_page_regions(page, candidates)
+        self.assertEqual(solutions["left"].mode, "panel_native")
+        self.assertEqual(solutions["left"].region, left_card.bbox)
+        self.assertEqual(solutions["right"].region, right_card.bbox)
+
+    def test_shared_native_panel_is_not_used_as_one_offer(self):
+        left_product = VisualObject(
+            "left-product", 1, "line", BBox(15, 25, 80, 40),
+            text="Produit A", semantic_role=SemanticRole.PRODUCT_TEXT,
+            semantic_confidence=.95,
+        )
+        right_product = VisualObject(
+            "right-product", 1, "line", BBox(115, 25, 180, 40),
+            text="Produit B", semantic_role=SemanticRole.PRODUCT_TEXT,
+            semantic_confidence=.95,
+        )
+        left_price = NumericFact("left-price", 1, "9,990 DT", "9,990", BBox(50, 70, 85, 95), NumericRole.PRICE_MAIN, .95)
+        right_price = NumericFact("right-price", 1, "8,990 DT", "8,990", BBox(150, 70, 185, 95), NumericRole.PRICE_MAIN, .95)
+        shared = VisualObject("shared", 1, "container", BBox(5, 5, 195, 110), semantic_role=SemanticRole.CONTAINER)
+        page = PageScene(1, 200, 130, [left_product, right_product, shared], [left_price, right_price])
+        candidates = [
+            OfferCandidate("left", 1, [left_product.id], [left_price.id], left_price.bbox, .95),
+            OfferCandidate("right", 1, [right_product.id], [right_price.id], right_price.bbox, .95),
+        ]
+        nuclei = build_offer_nuclei(page, candidates)
+        panels = detect_native_panels(page, candidates, nuclei, {"left": left_price.bbox, "right": right_price.bbox})
+        self.assertEqual(panels, {})
 
     def test_shared_raster_is_partitioned_and_footer_is_excluded(self):
         shared = VisualObject(

@@ -1,0 +1,445 @@
+diff --git a/ocr_catalogue/offers/panel_detector.py b/ocr_catalogue/offers/panel_detector.py
+new file mode 100644
+--- /dev/null
++++ b/ocr_catalogue/offers/panel_detector.py
+@@ -0,0 +1,218 @@
++from __future__ import annotations
++
++"""Detect native commercial panels before falling back to inferred regions.
++
++Many InDesign catalogues already expose card/frame geometry in the PDF.
++When that geometry contains exactly one commercial offer, it is more reliable
++than rebuilding the crop from OCR/semantic coordinates.
++
++This module stays conservative:
++
++* a native panel must contain the complete semantic core;
++* it must contain the offer's own main price;
++* it must not contain another offer's main-price centre or semantic nucleus;
++* it must not absorb a repeated header/footer;
++* repeated geometry improves confidence but is never mandatory.
++
++If these conditions are not met, the existing FREE_LAYOUT region solver keeps
++control.  No catalogue/page coordinates are hardcoded here.
++"""
++
++from dataclasses import dataclass
++import math
++
++from ..domain import BBox, OfferCandidate, PageScene, SemanticRole, VisualObject
++
++
++@dataclass(frozen=True)
++class NativePanel:
++    bbox: BBox
++    confidence: float
++    source_id: str
++    source_type: str
++    repetition_score: float = 0.0
++
++
++def _same_geometry(first: BBox, second: BBox) -> bool:
++    """Return True for panels with approximately repeated dimensions."""
++    if first.width <= 0 or first.height <= 0 or second.width <= 0 or second.height <= 0:
++        return False
++    width_ratio = min(first.width, second.width) / max(first.width, second.width)
++    height_ratio = min(first.height, second.height) / max(first.height, second.height)
++    area_ratio = min(first.area, second.area) / max(first.area, second.area)
++    return width_ratio >= .88 and height_ratio >= .88 and area_ratio >= .82
++
++
++def _visual_candidates(page: PageScene) -> list[VisualObject]:
++    page_area = max(1.0, page.width * page.height)
++    raw: list[VisualObject] = []
++    for obj in page.objects:
++        if obj.semantic_role == SemanticRole.CONTAINER:
++            if page_area * .002 <= obj.bbox.area <= page_area * .72:
++                raw.append(obj)
++        elif obj.semantic_role == SemanticRole.IMAGE:
++            # An image is only a possible panel background/support.  It is
++            # never assumed to be a product photo or a panel by itself.
++            fraction = obj.metadata.get("page_fraction", obj.bbox.area / page_area)
++            if .006 <= fraction <= .72:
++                raw.append(obj)
++
++    # InDesign often emits nearly identical rectangle/image objects. Keep the
++    # most structural one (CONTAINER wins over IMAGE) for the same geometry.
++    deduped: list[VisualObject] = []
++    for obj in sorted(
++        raw,
++        key=lambda item: (
++            0 if item.semantic_role == SemanticRole.CONTAINER else 1,
++            item.bbox.area,
++        ),
++    ):
++        duplicate = next(
++            (
++                other
++                for other in deduped
++                if abs(other.bbox.x0 - obj.bbox.x0) <= 2
++                and abs(other.bbox.top - obj.bbox.top) <= 2
++                and abs(other.bbox.x1 - obj.bbox.x1) <= 2
++                and abs(other.bbox.bottom - obj.bbox.bottom) <= 2
++            ),
++            None,
++        )
++        if duplicate is None:
++            deduped.append(obj)
++    return deduped
++
++
++def _repetition_score(panel: VisualObject, candidates: list[VisualObject]) -> float:
++    repeated = sum(
++        1
++        for other in candidates
++        if other.id != panel.id and _same_geometry(panel.bbox, other.bbox)
++    )
++    return min(1.0, repeated / 3.0)
++
++
++def _crosses_header_footer(page: PageScene, box: BBox) -> bool:
++    for obj in page.objects:
++        if obj.semantic_role != SemanticRole.HEADER_FOOTER:
++            continue
++        overlap = box.intersection_area(obj.bbox)
++        if overlap <= 0:
++            continue
++        # A repeated footer/header is often a very thin line. Compare overlap
++        # to the smaller object so a panel cannot silently swallow it.
++        ratio = overlap / max(1.0, min(box.area, obj.bbox.area))
++        if ratio >= .25:
++            return True
++    return False
++
++
++def _panel_score(
++    page: PageScene,
++    panel: VisualObject,
++    core: BBox,
++    repetition: float,
++) -> float:
++    page_area = max(1.0, page.width * page.height)
++    panel_area = max(1.0, panel.bbox.area)
++    core_area = max(1.0, core.area)
++
++    structural = .18 if panel.semantic_role == SemanticRole.CONTAINER else .08
++    repeated = .16 * repetition
++
++    # Prefer a panel that is comfortably larger than the semantic nucleus but
++    # not a huge page background. This is a score, not a hard card dimension.
++    fill_ratio = min(1.0, core_area / panel_area)
++    compactness = .16 * min(1.0, fill_ratio * 7.0)
++    page_penalty = .18 * max(0.0, panel_area / page_area - .42) / .30
++
++    left_space = max(0.0, core.x0 - panel.bbox.x0)
++    right_space = max(0.0, panel.bbox.x1 - core.x1)
++    top_space = max(0.0, core.top - panel.bbox.top)
++    bottom_space = max(0.0, panel.bbox.bottom - core.bottom)
++    margins = [left_space, right_space, top_space, bottom_space]
++    margin_balance = min(margins) / max(1.0, max(margins)) if max(margins) else 0.0
++
++    return max(
++        0.0,
++        min(
++            .99,
++            .42                         # complete core + own main price
++            + structural
++            + repeated
++            + compactness
++            + .07 * margin_balance
++            - page_penalty,
++        ),
++    )
++
++
++def detect_native_panels(
++    page: PageScene,
++    candidates: list[OfferCandidate],
++    nuclei: dict[str, BBox],
++    main_prices: dict[str, BBox],
++) -> dict[str, NativePanel]:
++    """Return one exclusive native panel for offers where PDF geometry proves it."""
++    visual = _visual_candidates(page)
++    if not visual:
++        return {}
++
++    result: dict[str, NativePanel] = {}
++    page_area = max(1.0, page.width * page.height)
++
++    for candidate in candidates:
++        core = nuclei.get(candidate.id)
++        own_price = main_prices.get(candidate.id)
++        if core is None or own_price is None:
++            continue
++
++        ranked: list[tuple[float, float, NativePanel]] = []
++        for panel in visual:
++            box = panel.bbox
++
++            # Native mode is intentionally strict. A panel must enclose the
++            # complete semantic nucleus, not only its centre.
++            if not box.contains(core, 2.5):
++                continue
++            if not box.contains_point(own_price.cx, own_price.cy, 2.5):
++                continue
++            if box.area < max(core.area * 1.03, page_area * .002):
++                continue
++
++            foreign_prices = sum(
++                box.contains_point(price.cx, price.cy)
++                for offer_id, price in main_prices.items()
++                if offer_id != candidate.id
++            )
++            foreign_nuclei = sum(
++                box.contains_point(other.cx, other.cy)
++                for offer_id, other in nuclei.items()
++                if offer_id != candidate.id
++            )
++            if foreign_prices or foreign_nuclei:
++                # This is a shared panel, not an exclusive native offer card.
++                # The existing FREE_LAYOUT/shared-support solver will split it.
++                continue
++            if _crosses_header_footer(page, box):
++                continue
++
++            repetition = _repetition_score(panel, visual)
++            confidence = _panel_score(page, panel, core, repetition)
++            if confidence < .62:
++                continue
++
++            native = NativePanel(
++                bbox=box,
++                confidence=confidence,
++                source_id=panel.id,
++                source_type=panel.semantic_role.value,
++                repetition_score=repetition,
++            )
++            # Prefer high confidence, then the smallest valid structural panel.
++            ranked.append((confidence, -box.area, native))
++
++        if ranked:
++            result[candidate.id] = max(ranked, key=lambda item: (item[0], item[1]))[2]
++
++    return result
+diff --git a/ocr_catalogue/offers/region_solver.py b/ocr_catalogue/offers/region_solver.py
+--- a/ocr_catalogue/offers/region_solver.py
++++ b/ocr_catalogue/offers/region_solver.py
+@@ -13,6 +13,7 @@ import numpy as np
+ from PIL import Image
+
+ from ..domain import BBox, NumericFact, NumericRole, OfferCandidate, PageScene, SemanticRole, VisualObject
++from .panel_detector import detect_native_panels
+
+
+ CORE_SEMANTIC_ROLES = {
+@@ -41,6 +42,9 @@ class RegionSolution:
+     neighbours: NeighbourMap = field(default_factory=NeighbourMap)
+     boundary_evidence: dict[str, str] = field(default_factory=dict)
+     quality: dict[str, object] = field(default_factory=dict)
++    mode: str = "free_layout"
++    native_panel_bbox: list[float] = field(default_factory=list)
++    panel_confidence: float = 0.0
+
+
+ def _union(boxes: Iterable[BBox], fallback: BBox) -> BBox:
+@@ -287,10 +291,16 @@ def _quality(page: PageScene, candidate: OfferCandidate, solution: RegionSolutio
+     semantic_coverage = covered / max(1, len(semantic_boxes))
+     foreign_nuclei, competing_prices = _foreign_counts(solution.region, candidate.id, nuclei, main_prices)
+-    border_contact = {
+-        side: raster.border_activity(solution.region, side) and abs(getattr(solution.region, {"left":"x0","right":"x1","top":"top","bottom":"bottom"}[side]) - getattr(solution.safe_region, {"left":"x0","right":"x1","top":"top","bottom":"bottom"}[side])) > 1e-3
+-        for side in ("left", "right", "top", "bottom")
+-    }
+-    visual_completeness = 1.0 - sum(border_contact.values()) / 4
++    if solution.mode == "panel_native":
++        # Active pixels on a true card border are expected and must not be
++        # interpreted as an incomplete crop.
++        border_contact = {side: False for side in ("left", "right", "top", "bottom")}
++        visual_completeness = 1.0
++    else:
++        border_contact = {
++            side: raster.border_activity(solution.region, side) and abs(getattr(solution.region, {"left":"x0","right":"x1","top":"top","bottom":"bottom"}[side]) - getattr(solution.safe_region, {"left":"x0","right":"x1","top":"top","bottom":"bottom"}[side])) > 1e-3
++            for side in ("left", "right", "top", "bottom")
++        }
++        visual_completeness = 1.0 - sum(border_contact.values()) / 4
+     contamination = min(1.0, foreign_nuclei * .55 + competing_prices * .75)
+     accepted = semantic_coverage >= .999 and visual_completeness >= .75 and contamination < .5 and competing_prices == 0
+     return {
+@@ -306,6 +315,9 @@ def _quality(page: PageScene, candidate: OfferCandidate, solution: RegionSolutio
+         "border_contact": border_contact,
+         "crosses_header_footer": any(obj.semantic_role == SemanticRole.HEADER_FOOTER and solution.region.intersects(obj.bbox) for obj in page.objects),
+         "accepted": accepted,
++        "crop_mode": solution.mode,
++        "native_panel_bbox": solution.native_panel_bbox,
++        "panel_confidence": round(solution.panel_confidence, 4),
+     }
+
+
+@@ -391,20 +403,36 @@ def solve_page_regions(page: PageScene, candidates: list[OfferCandidate]) -> dict
+     solutions = infer_safe_regions(page, candidates)
+     nuclei = {offer_id: solution.semantic_core for offer_id, solution in solutions.items()}
+     raster = RasterEvidence(page)
++    main_prices = _main_price_boxes(candidates, facts)
++    native_panels = detect_native_panels(page, candidates, nuclei, main_prices)
+     for candidate in candidates:
+         solution = solutions[candidate.id]
+-        solution.region = _visual_envelope(page, candidate, solution.semantic_core, solution.safe_region, objects, raster)
+-        strong_boundaries = sum(
+-            reason in {"separateur_visuel", "conteneur_exclusif", "header_footer"}
+-            for reason in solution.boundary_evidence.values()
+-        )
+-        if strong_boundaries >= 3 and solution.safe_region.area <= page.width * page.height * .4:
+-            # A card whose territory is confirmed on most sides is itself the
+-            # offer region. Do not collapse it to its bottom caption.
+-            solution.region = solution.safe_region
++        native = native_panels.get(candidate.id)
++        if native is not None:
++            # PDF-native geometry is the strongest boundary signal available.
++            # Crop the rendered page using this bbox; do not export the XObject
++            # itself because text/price/badges may live on separate PDF layers.
++            solution.region = native.bbox.clip(page.width, page.height)
++            solution.safe_region = solution.region
++            solution.mode = "panel_native"
++            solution.native_panel_bbox = native.bbox.as_list()
++            solution.panel_confidence = native.confidence
++            solution.boundary_evidence = {
++                side: "panneau_natif"
++                for side in ("left", "right", "above", "below")
++            }
++        else:
++            # Only pages/offers without a proven native panel use the inferred
++            # FREE_LAYOUT solver.
++            solution.region = _visual_envelope(page, candidate, solution.semantic_core, solution.safe_region, objects, raster)
++            strong_boundaries = sum(
++                reason in {"separateur_visuel", "conteneur_exclusif", "header_footer"}
++                for reason in solution.boundary_evidence.values()
++            )
++            if strong_boundaries >= 3 and solution.safe_region.area <= page.width * page.height * .4:
++                solution.region = solution.safe_region
+     # Page-level second pass: no two independent offers may own the same area.
+     _resolve_page_conflicts(solutions)
+-    main_prices = _main_price_boxes(candidates, facts)
+     _enforce_exclusivity(page, solutions, nuclei, main_prices)
+     _resolve_page_conflicts(solutions)
+     for candidate in candidates:
+diff --git a/ocr_catalogue/offers/resolver.py b/ocr_catalogue/offers/resolver.py
+--- a/ocr_catalogue/offers/resolver.py
++++ b/ocr_catalogue/offers/resolver.py
+@@ -534,7 +534,7 @@ def _assemble(page: PageScene, candidates: list[OfferCandidate], graph: SpatialG
+         credit = next((fact for fact in facts if fact.role == NumericRole.CREDIT_PAYMENT), None)
+         basis_obj = next((obj for obj in objects if obj.semantic_role == SemanticRole.PRICE_BASIS), None)
+         solution = region_solutions[candidate.id]
+-        region, crop_mode = solution.region, "iterative_region_solver"
++        region, crop_mode = solution.region, solution.mode
+         contamination = _contamination(region, set(candidate.object_ids), page, assignment_owner)
+         components = [main.confidence if main else .25, .92 if product else .3, max(.15, 1 - contamination)]
+         if brands: components.append(.86)
+diff --git a/ocr_catalogue/pipeline.py b/ocr_catalogue/pipeline.py
+--- a/ocr_catalogue/pipeline.py
++++ b/ocr_catalogue/pipeline.py
+@@ -91,6 +91,6 @@ def extract_offers(source: Path, folder: Path, raster_pages: list[Path], progress
+     diagnostic_images = _write_diagnostic_contact_sheets(products, folder)
+     audit = {
+-        "engine": "offer-region-v2",
++        "engine": "offer-region-v3-native-panels",
+         "style": asdict(document.style),
+         "offers": [asdict(offer) for offer in offers],
+         "pages": [
+@@ -106,6 +106,7 @@ def extract_offers(source: Path, folder: Path, raster_pages: list[Path], progress
+                         "product": offer.product_name,
+                         "region": offer.bbox.as_list(),
+                         "safe_region": offer.safe_bbox,
++                        "crop_mode": offer.crop_mode,
+                         "quality": offer.region_quality,
+                     }
+                     for offer in offers if offer.page == page.number
+diff --git a/tests/test_offer_engine.py b/tests/test_offer_engine.py
+--- a/tests/test_offer_engine.py
++++ b/tests/test_offer_engine.py
+@@ -5,4 +5,5 @@ from ocr_catalogue.graph import build_spatial_graph
+ from ocr_catalogue.ingestion.pdf_scene import _collapse_overprint_word, _line_objects
++from ocr_catalogue.offers.panel_detector import detect_native_panels
+ from ocr_catalogue.offers.resolver import _merge_product_with_priced_brand, _offer_bbox, _offer_candidates, _partition_container, _pick_product, _reassign_secondary_facts
+ from ocr_catalogue.offers.region_solver import build_offer_nuclei, solve_page_regions
+ from ocr_catalogue.pipeline import _to_product
+@@ -192,6 +193,81 @@ class OfferEngineTests(unittest.TestCase):
+         result = _partition_container(container, (150, 150), [(50, 50)])
+         self.assertEqual(result, container)
+
++    def test_native_panel_detector_uses_exclusive_pdf_card(self):
++        left_product = VisualObject(
++            "left-product", 1, "line", BBox(15, 25, 80, 40),
++            text="Tabouret", semantic_role=SemanticRole.PRODUCT_TEXT,
++            semantic_confidence=.95,
++        )
++        right_product = VisualObject(
++            "right-product", 1, "line", BBox(115, 25, 180, 40),
++            text="Parasol", semantic_role=SemanticRole.PRODUCT_TEXT,
++            semantic_confidence=.95,
++        )
++        left_price = NumericFact(
++            "left-price", 1, "16,900 DT", "16,900",
++            BBox(55, 70, 88, 96), NumericRole.PRICE_MAIN, .96,
++        )
++        right_price = NumericFact(
++            "right-price", 1, "89,900 DT", "89,900",
++            BBox(155, 70, 188, 96), NumericRole.PRICE_MAIN, .96,
++        )
++        left_card = VisualObject(
++            "left-card", 1, "container", BBox(5, 5, 98, 110),
++            semantic_role=SemanticRole.CONTAINER,
++        )
++        right_card = VisualObject(
++            "right-card", 1, "container", BBox(102, 5, 195, 110),
++            semantic_role=SemanticRole.CONTAINER,
++        )
++        page = PageScene(
++            1, 200, 130,
++            [left_product, right_product, left_card, right_card],
++            [left_price, right_price],
++        )
++        candidates = [
++            OfferCandidate("left", 1, [left_product.id], [left_price.id], left_price.bbox, .95),
++            OfferCandidate("right", 1, [right_product.id], [right_price.id], right_price.bbox, .95),
++        ]
++        nuclei = build_offer_nuclei(page, candidates)
++        panels = detect_native_panels(
++            page,
++            candidates,
++            nuclei,
++            {"left": left_price.bbox, "right": right_price.bbox},
++        )
++
++        self.assertEqual(panels["left"].bbox, left_card.bbox)
++        self.assertEqual(panels["right"].bbox, right_card.bbox)
++
++        solutions = solve_page_regions(page, candidates)
++        self.assertEqual(solutions["left"].mode, "panel_native")
++        self.assertEqual(solutions["left"].region, left_card.bbox)
++        self.assertEqual(solutions["right"].region, right_card.bbox)
++
++    def test_shared_native_panel_is_not_used_as_one_offer(self):
++        left_product = VisualObject(
++            "left-product", 1, "line", BBox(15, 25, 80, 40),
++            text="Produit A", semantic_role=SemanticRole.PRODUCT_TEXT,
++            semantic_confidence=.95,
++        )
++        right_product = VisualObject(
++            "right-product", 1, "line", BBox(115, 25, 180, 40),
++            text="Produit B", semantic_role=SemanticRole.PRODUCT_TEXT,
++            semantic_confidence=.95,
++        )
++        left_price = NumericFact("left-price", 1, "9,990 DT", "9,990", BBox(50, 70, 85, 95), NumericRole.PRICE_MAIN, .95)
++        right_price = NumericFact("right-price", 1, "8,990 DT", "8,990", BBox(150, 70, 185, 95), NumericRole.PRICE_MAIN, .95)
++        shared = VisualObject("shared", 1, "container", BBox(5, 5, 195, 110), semantic_role=SemanticRole.CONTAINER)
++        page = PageScene(1, 200, 130, [left_product, right_product, shared], [left_price, right_price])
++        candidates = [
++            OfferCandidate("left", 1, [left_product.id], [left_price.id], left_price.bbox, .95),
++            OfferCandidate("right", 1, [right_product.id], [right_price.id], right_price.bbox, .95),
++        ]
++        nuclei = build_offer_nuclei(page, candidates)
++        panels = detect_native_panels(page, candidates, nuclei, {"left": left_price.bbox, "right": right_price.bbox})
++        self.assertEqual(panels, {})
++
+     def test_shared_raster_is_partitioned_and_footer_is_excluded(self):
+         shared = VisualObject(
+             "shared", 1, "image", BBox(0, 0, 300, 180),

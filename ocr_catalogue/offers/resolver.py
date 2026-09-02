@@ -771,7 +771,7 @@ def _assemble(page: PageScene, candidates: list[OfferCandidate], graph: SpatialG
         credit = next((fact for fact in facts if fact.role == NumericRole.CREDIT_PAYMENT), None)
         basis_obj = next((obj for obj in objects if obj.semantic_role == SemanticRole.PRICE_BASIS), None)
         solution = region_solutions[candidate.id]
-        region, crop_mode = solution.region, "iterative_region_solver"
+        region, crop_mode = solution.region, solution.mode
         contamination = _contamination(region, set(candidate.object_ids), page, assignment_owner)
         components = [main.confidence if main else .25, .92 if product else .3, max(.15, 1 - contamination)]
         if brands: components.append(.86)
