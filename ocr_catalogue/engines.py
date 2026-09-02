@@ -98,16 +98,6 @@ def _merge_price_tokens(tokens: list[Token]) -> list[tuple[str, Token]]:
     return unique
 
 
-def _is_reference_price(token: Token, tokens: list[Token]) -> bool:
-    """Recognise a secondary price introduced by wording such as "à 6,090 DT"."""
-    return any(
-        other.text.lower().strip() in {"à", "au", "avant"}
-        and 0 <= token.x0 - other.x1 <= 28
-        and abs(token.cy - other.cy) <= 20
-        for other in tokens
-    )
-
-
 def _region_for_anchor(anchor: Token, anchors: list[Token], width: float, height: float) -> tuple[float, float, float, float]:
     same_row = [a for a in anchors if abs(a.cy - anchor.cy) < max(32, height * .045)]
     lefts = [a.cx for a in same_row if a.cx < anchor.cx]
@@ -337,7 +327,7 @@ def _text_fields(tokens: list[Token], price: str, anchor: Token | None = None) -
     texts = [text for text, _ in lines]
     arabic = " ".join(x for x in texts if ARABIC.search(x))
     latin = [x for x in texts if not ARABIC.search(x) and not PRICE_HEAD.match(x.replace(" ", "")) and x.upper() != "DT" and not NOISE.search(x)]
-    remise = next((m.group(1) + " %" for x in texts if (m := PERCENT.match(x.replace(" ", "")))), "")
+    pourcentage = next((m.group(1) + " %" for x in texts if (m := PERCENT.match(x.replace(" ", "")))), "")
     joined = " ".join(texts).replace("ERFFO", "OFFRE")
     promotion = _cashback_promotion(tokens)
     if not promotion:
@@ -392,7 +382,7 @@ def _text_fields(tokens: list[Token], price: str, anchor: Token | None = None) -
         if ranked:
             produit = ranked[0]
     produit = re.sub(r"\s*%\s*$", "", produit).strip()
-    confidence = 35 + (20 if produit != "Produit à vérifier" else 0) + (15 if marque else 0) + (10 if quantite else 0) + (10 if remise else 0)
+    confidence = 35 + (20 if produit != "Produit à vérifier" else 0) + (15 if marque else 0) + (10 if quantite else 0) + (10 if pourcentage else 0)
     return produit, arabic, marque, quantite, promotion, min(confidence, 95)
 
 

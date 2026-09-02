@@ -74,36 +74,6 @@ def _assign_objects(page: PageScene, graph: SpatialGraph, candidates: list[Offer
         for candidate in candidates:
             seed = seeds[candidate.id]
             score = graph.weight(seed, fact.id)
-            if fact.role == NumericRole.PRICE_REFERENCE:
-                linked_objects = [obj_id for obj_id in by_candidate[candidate.id].object_ids]
-                score = max(score, max((graph.weight(obj_id, fact.id) * .9 + .12 for obj_id in linked_objects), default=0.0))
-                cue_lines = [
-                    obj for obj in page.objects
-                    if obj.raw_type == "line" and re.search(r"\b(?:à|avant)\b", obj.text, re.I)
-                    and obj.bbox.distance(fact.bbox) <= max(18.0, obj.font_size * 3)
-                ]
-                if any(obj.id in linked_objects for obj in cue_lines):
-                    score = max(score, .97)
-                elif cue_lines:
-                    semantic_nucleus = [
-                        obj_id for obj_id in linked_objects
-                        if obj_id in object_map and object_map[obj_id].semantic_role in {SemanticRole.PRODUCT_TEXT, SemanticRole.BRAND}
-                    ]
-                    cue_to_product = max(
-                        (graph.weight(cue.id, obj_id) for cue in cue_lines for obj_id in semantic_nucleus),
-                        default=0.0,
-                    )
-                    semantic_objects = [object_map[obj_id] for obj_id in semantic_nucleus]
-                    cue_distance = min(
-                        (cue.bbox.distance(obj.bbox) for cue in cue_lines for obj in semantic_objects),
-                        default=math.inf,
-                    )
-                    cue_scale = max(24.0, statistics.median([cue.font_size for cue in cue_lines]) * 6.0)
-                    cue_proximity = math.exp(-cue_distance / cue_scale) if math.isfinite(cue_distance) else 0.0
-                    # An explicit "à/avant" cue owns its reference price.
-                    # Resolve through the nearest product nucleus instead of
-                    # the closest main-price badge, which may be next door.
-                    score = max(cue_to_product * .9 + .18, cue_proximity)
             if score == 0 and candidate.bbox:
                 scale = max(20.0, math.hypot(page.width, page.height) * .08)
                 score = math.exp(-candidate.bbox.distance(fact.bbox) / scale) * .5
@@ -308,12 +278,96 @@ def _snap_to_separators(bbox: BBox, page: PageScene) -> BBox:
     return BBox(x0, top, x1, bottom)
 
 
+def _clip_to_header_footer(region: BBox, essential_core: BBox, page: PageScene) -> BBox:
+    """Prevent an offer crop from crossing a semantic header/footer band."""
+    result = region
+    margin = max(1.5, min(page.width, page.height) * .003)
+    barriers = [
+        obj for obj in page.objects
+        if obj.semantic_role == SemanticRole.HEADER_FOOTER and obj.raw_type == "line"
+    ]
+    for barrier in barriers:
+        box = barrier.bbox
+        overlap_x = max(0.0, min(result.x1, box.x1) - max(result.x0, box.x0))
+        if overlap_x / max(1.0, min(result.width, box.width)) < .25:
+            continue
+        if box.top >= essential_core.bottom and result.bottom > box.top:
+            candidate = BBox(result.x0, result.top, result.x1, max(essential_core.bottom, box.top - margin))
+            if candidate.contains(essential_core):
+                result = candidate
+        elif box.bottom <= essential_core.top and result.top < box.bottom:
+            candidate = BBox(result.x0, min(essential_core.top, box.bottom + margin), result.x1, result.bottom)
+            if candidate.contains(essential_core):
+                result = candidate
+    return result.clip(page.width, page.height)
+
+
+def _partition_visual_support(
+    support: BBox,
+    origin: BBox,
+    essential_core: BBox,
+    own_main: NumericFact | None,
+    page: PageScene,
+    all_cores: dict[str, BBox],
+    candidate_id: str,
+) -> tuple[BBox, bool]:
+    """Return the local part of a raster shared by neighbouring offers."""
+    current_x = own_main.bbox.cx if own_main else origin.cx
+    current_y = own_main.bbox.cy if own_main else origin.cy
+    competing = [
+        (core.cx, core.cy) for offer_id, core in all_cores.items()
+        if offer_id != candidate_id and support.contains_point(core.cx, core.cy)
+    ]
+    for fact in page.numeric_facts:
+        if fact.role != NumericRole.PRICE_MAIN or fact.confidence < .45:
+            continue
+        if not support.contains_point(fact.bbox.cx, fact.bbox.cy):
+            continue
+        if math.hypot(fact.bbox.cx - current_x, fact.bbox.cy - current_y) <= max(8.0, max(fact.bbox.width, fact.bbox.height) * .75):
+            continue
+        if not any(math.hypot(x - fact.bbox.cx, y - fact.bbox.cy) < 8 for x, y in competing):
+            competing.append((fact.bbox.cx, fact.bbox.cy))
+    if not competing:
+        return support, False
+    partitioned = _partition_container(support, (current_x, current_y), competing)
+    if partitioned.width < 8 or partitioned.height < 8:
+        return support, True
+    return partitioned, True
+
+
+def _clip_competing_main_prices(region: BBox, essential_core: BBox, own_main: NumericFact | None, page: PageScene) -> BBox:
+    """Ensure the final crop cannot retain an unrelated main-price centre."""
+    if own_main is None:
+        return region
+    result = region
+    own_x, own_y = own_main.bbox.cx, own_main.bbox.cy
+    others = [
+        fact for fact in page.numeric_facts
+        if fact.role == NumericRole.PRICE_MAIN and fact.id != own_main.id and fact.confidence >= .45
+    ]
+    for other in sorted(others, key=lambda fact: math.hypot(fact.bbox.cx - own_x, fact.bbox.cy - own_y)):
+        if not result.contains_point(other.bbox.cx, other.bbox.cy):
+            continue
+        dx, dy = other.bbox.cx - own_x, other.bbox.cy - own_y
+        proposal = result
+        if abs(dx) >= max(1.0, abs(dy)) * 1.2:
+            boundary = (own_x + other.bbox.cx) / 2
+            proposal = BBox(max(result.x0, boundary), result.top, result.x1, result.bottom) if dx < 0 else BBox(result.x0, result.top, min(result.x1, boundary), result.bottom)
+        elif abs(dy) >= max(1.0, abs(dx)) * 1.2:
+            boundary = (own_y + other.bbox.cy) / 2
+            proposal = BBox(result.x0, max(result.top, boundary), result.x1, result.bottom) if dy < 0 else BBox(result.x0, result.top, result.x1, min(result.bottom, boundary))
+        if proposal.contains(essential_core) and proposal.width >= max(8.0, essential_core.width) and proposal.height >= max(8.0, essential_core.height):
+            result = proposal
+    return result.clip(page.width, page.height)
+
+
 def _offer_bbox(page: PageScene, candidate: OfferCandidate, objects: list[VisualObject], facts: list[NumericFact], all_cores: dict[str, BBox]) -> tuple[BBox, str]:
     key_objects = [obj for obj in objects if obj.semantic_role != SemanticRole.IMAGE]
     essential_boxes = [obj.bbox for obj in key_objects] + [fact.bbox for fact in facts]
     essential_core = essential_boxes[0] if essential_boxes else (candidate.bbox or BBox(0, 0, page.width, page.height))
     for box in essential_boxes[1:]:
         essential_core = essential_core.union(box)
+    own_main = next((fact for fact in facts if fact.role == NumericRole.PRICE_MAIN), None)
     boxes = list(essential_boxes)
     image_boxes = [obj.bbox for obj in objects if obj.semantic_role == SemanticRole.IMAGE and obj.metadata.get("page_fraction", 1) <= .18]
     boxes.extend(image_boxes)
@@ -329,7 +383,11 @@ def _offer_bbox(page: PageScene, candidate: OfferCandidate, objects: list[Visual
         overlap_y = max(0.0, min(obj.bbox.bottom, essential_core.bottom) - max(obj.bbox.top, essential_core.top))
         projected = overlap_x >= min(obj.bbox.width, essential_core.width) * .12 or overlap_y >= min(obj.bbox.height, essential_core.height) * .12
         if projected and obj.bbox.distance(essential_core) <= support_radius:
-            boxes.append(obj.bbox)
+            local_support, _ = _partition_visual_support(
+                obj.bbox, essential_core, essential_core, own_main,
+                page, all_cores, candidate.id,
+            )
+            boxes.append(local_support)
     core = boxes[0] if boxes else BBox(0, 0, page.width, page.height)
     for box in boxes[1:]:
         core = core.union(box)
@@ -391,6 +449,9 @@ def _offer_bbox(page: PageScene, candidate: OfferCandidate, objects: list[Visual
                 result = proposal
         if core.bottom >= page.height - pad * 4 and result.bottom > core.bottom:
             result = BBox(result.x0, result.top, result.x1, core.bottom)
+        result = result.clip(page.width, page.height)
+        result = _clip_competing_main_prices(result, essential_core, own_main, page)
+        result = _clip_to_header_footer(result, essential_core, page)
         return result.clip(page.width, page.height)
 
     if container and container.area <= page.width * page.height * .72:
@@ -468,9 +529,8 @@ def _assemble(page: PageScene, candidates: list[OfferCandidate], graph: SpatialG
         quantities = [obj.text for obj in objects if obj.semantic_role == SemanticRole.QUANTITY]
         models = [obj.text for obj in objects if obj.semantic_role == SemanticRole.MODEL]
         technical = [obj.text for obj in objects if obj.semantic_role == SemanticRole.TECHNICAL_SPEC]
-        reference = next((fact for fact in facts if fact.role == NumericRole.PRICE_REFERENCE), None)
         cashback = next((fact for fact in facts if fact.role == NumericRole.CASHBACK), None)
-        discount = next((fact for fact in facts if fact.role == NumericRole.DISCOUNT), None)
+        percentage = next((fact for fact in facts if fact.role == NumericRole.DISCOUNT), None)
         credit = next((fact for fact in facts if fact.role == NumericRole.CREDIT_PAYMENT), None)
         basis_obj = next((obj for obj in objects if obj.semantic_role == SemanticRole.PRICE_BASIS), None)
         region, crop_mode = _offer_bbox(page, candidate, objects, facts, preliminary)
@@ -490,7 +550,7 @@ def _assemble(page: PageScene, candidates: list[OfferCandidate], graph: SpatialG
             product_name=product or "Produit à vérifier", arabic_name=" ".join(dict.fromkeys(arabic)),
             brand=next((brand for brand in brands if brand), ""), model=models[0] if models else "",
             quantity=quantities[-1] if quantities else "", main_price=(main.value + " DT") if main else "",
-            reference_price=(reference.value + " DT") if reference else "", discount=(discount.value + " %") if discount else "",
+            percentage=(percentage.value + " %") if percentage else "",
             promotion=parse_promotion(objects, (cashback.value + " DT versés") if cashback else ""),
             cashback=(cashback.value + " DT versés") if cashback else "", price_basis=basis_obj.text if basis_obj else "",
             credit_payment=(credit.value + " DT") if credit else "", technical_specs=technical,

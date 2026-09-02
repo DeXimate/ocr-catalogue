@@ -11,7 +11,7 @@ from openpyxl.styles import Font, PatternFill
 COLUMNS = [
     ("photo", "Photo"), ("produit", "Produit"), ("marque", "Marque"),
     ("quantite", "Quantité"), ("prix_promo", "Prix promo"),
-    ("ancien_prix", "Ancien prix"), ("remise", "Remise"),
+    ("pourcentage", "Pourcentage"),
     ("promotion", "Promotion"), ("page", "Page"),
     ("confiance", "Confiance"), ("statut", "Statut"),
 ]
@@ -72,4 +72,3 @@ def export_xlsx(products: list[dict], folder: Path, target: Path, include_photos
     meta.append(["Photos incluses", "Oui" if include_photos else "Non"])
     meta.append(["Périmètre", scope])
     wb.save(target)
-

@@ -7,25 +7,63 @@
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <header>
-    <div><span class="logo">M</span><div><h1>OCR Catalogue</h1><p>Extraction locale de produits Monoprix</p></div></div>
-    <label class="import">Importer un catalogue<input id="file" type="file" accept=".pdf,.jpg,.jpeg,.png"></label>
+  <header class="app-header">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">M</span>
+      <div><h1>OCR Catalogue</h1><p>Extraction et validation des offres</p></div>
+    </div>
+    <label class="button button-primary import">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L7 9m5-5 5 5M5 14v5h14v-5"/></svg>
+      Importer un catalogue<input id="file" type="file" accept=".pdf,.jpg,.jpeg,.png">
+    </label>
   </header>
+
   <main>
-    <section class="toolbar">
-      <select id="jobs"><option value="">Choisir un traitement</option></select>
-      <input id="search" placeholder="Rechercher un produit ou une marque">
-      <select id="status"><option value="">Tous les statuts</option><option>À vérifier</option><option>Validé</option></select>
-      <button id="validate">Valider la sélection</button>
-      <button id="save" class="secondary">Enregistrer</button>
-      <button id="export">Exporter</button>
+    <section class="workspace-head">
+      <div><p class="eyebrow">Espace de contrôle</p><h2>Produits extraits</h2><p class="workspace-copy">Vérifiez les informations, corrigez les cellules puis validez les lignes.</p></div>
+      <div id="saveState" class="save-state" aria-live="polite">Toutes les modifications sont enregistrées</div>
     </section>
-    <section id="progress" class="progress hidden"><span></span><p></p></section>
-    <section class="summary"><div><strong id="count">0</strong><span>produits</span></div><div><strong id="review">0</strong><span>à vérifier</span></div><div><strong id="average">0%</strong><span>confiance moyenne</span></div></section>
-    <section class="table-wrap"><table><thead><tr><th><input id="all" type="checkbox"></th><th>Photo</th><th>Produit</th><th>Marque</th><th>Quantité</th><th>Prix promo</th><th>Ancien prix</th><th>Remise</th><th>Promotion</th><th>Page</th><th>Confiance</th><th>Statut</th></tr></thead><tbody id="rows"></tbody></table><div id="empty">Importez un catalogue pour commencer.</div></section>
+
+    <section class="control-panel" aria-label="Filtres et actions">
+      <div class="field catalogue-field"><label for="jobs">Catalogue</label><select id="jobs"><option value="">Choisir un traitement</option></select></div>
+      <div class="field search-field"><label for="search">Recherche</label><div class="search-control"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg><input id="search" placeholder="Produit ou marque…" autocomplete="off"></div></div>
+      <div class="field status-field"><label for="status">Statut</label><select id="status"><option value="">Tous les statuts</option><option>À vérifier</option><option>Validé</option></select></div>
+      <div class="toolbar-actions">
+        <button id="validate" class="button button-soft"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>Valider <span id="selectedCount" class="button-count hidden">0</span></button>
+        <button id="save" class="button button-secondary"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h12l2 2v14H5zM8 4v6h8V4M8 20v-6h8v6"/></svg>Enregistrer</button>
+        <button id="export" class="button button-primary"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v12m0 0-5-5m5 5 5-5M5 20h14"/></svg>Exporter</button>
+      </div>
+    </section>
+
+    <section id="progress" class="progress hidden" aria-live="polite"><div><span></span></div><p></p></section>
+
+    <section class="summary" aria-label="Résumé du catalogue">
+      <div class="summary-card summary-products"><div><strong id="count">0</strong><span>Produits extraits</span></div></div>
+      <div class="summary-card summary-review"><div><strong id="review">0</strong><span>À vérifier</span></div></div>
+      <div class="summary-card summary-confidence"><div><strong id="average">0%</strong><span>Confiance moyenne</span></div></div>
+    </section>
+
+    <section class="table-card">
+      <div class="table-meta"><div><strong id="visibleCount">0 produit</strong><span id="filterHint"> dans ce catalogue</span></div><span class="edit-hint">Cliquez dans une cellule pour la modifier</span></div>
+      <div class="table-wrap">
+        <table><thead><tr><th class="check-cell"><input id="all" type="checkbox" aria-label="Tout sélectionner"></th><th>Photo</th><th>Produit</th><th>Marque</th><th>Quantité</th><th>Prix promo</th><th>Pourcentage</th><th>Promotion</th><th>Page</th><th>Confiance</th><th>Statut</th></tr></thead><tbody id="rows"></tbody></table>
+        <div id="empty"><span class="empty-icon" aria-hidden="true">▦</span><strong>Aucun produit à afficher</strong><p>Importez un catalogue ou modifiez vos filtres.</p></div>
+      </div>
+    </section>
   </main>
-  <dialog id="preview"><button class="close">×</button><img><h3></h3></dialog>
-  <dialog id="exportDialog"><form method="dialog"><h2>Exporter les produits</h2><label>Format<select id="format"><option value="xlsx">Excel XLSX</option><option value="csv">CSV UTF-8</option></select></label><label class="check"><input id="photos" type="checkbox"> Inclure les photos</label><label>Lignes<select id="scope"><option value="all">Toutes les lignes</option><option value="validated">Validées uniquement</option><option value="selected">Sélection actuelle</option></select></label><div><button value="cancel" class="secondary">Annuler</button><button id="confirmExport" value="default">Créer l'export</button></div></form></dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <dialog id="preview"><div class="preview-head"><div><p>Encart source</p><h3></h3></div><button class="icon-button close" aria-label="Fermer">×</button></div><div class="preview-image"><img alt="Encart du produit"></div></dialog>
+  <dialog id="exportDialog">
+    <form method="dialog">
+      <div class="dialog-head"><div><p class="eyebrow">Export</p><h2>Créer un fichier</h2></div><button value="cancel" class="icon-button" aria-label="Fermer">×</button></div>
+      <p class="dialog-copy">Choisissez le format et les lignes à inclure.</p>
+      <label>Format<select id="format"><option value="xlsx">Excel (.xlsx)</option><option value="csv">CSV UTF-8 (.csv)</option></select></label>
+      <label class="switch-row"><span><strong>Inclure les photos</strong><small>Images intégrées dans Excel, chemins dans CSV</small></span><input id="photos" type="checkbox" role="switch"></label>
+      <label>Lignes à exporter<select id="scope"><option value="all">Toutes les lignes</option><option value="validated">Lignes validées</option><option value="selected">Sélection actuelle</option></select></label>
+      <div class="dialog-actions"><button value="cancel" class="button button-secondary">Annuler</button><button id="confirmExport" value="default" class="button button-primary">Créer l’export</button></div>
+    </form>
+  </dialog>
   <script src="/app.js"></script>
 </body>
 </html>

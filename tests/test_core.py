@@ -4,8 +4,9 @@ from pathlib import Path
 
 from openpyxl import load_workbook
 
-from ocr_catalogue.engines import Token, _cashback_promotion, _dedupe_overprint_digits, _embedded_product_bbox, _group_lines, _is_reference_price, _merge_price_tokens, _partition_region_by_anchors, _text_fields, _valid_product_region
+from ocr_catalogue.engines import Token, _cashback_promotion, _dedupe_overprint_digits, _embedded_product_bbox, _group_lines, _merge_price_tokens, _partition_region_by_anchors, _text_fields, _valid_product_region
 from ocr_catalogue.exporter import export_csv, export_xlsx
+from ocr_catalogue.models import Product
 
 
 class ExtractionTests(unittest.TestCase):
@@ -15,12 +16,6 @@ class ExtractionTests(unittest.TestCase):
             Token("6", 45, 10, 56, 38), Token("DT", 59, 11, 67, 21), Token(",090", 56, 18, 82, 37),
         ]
         self.assertEqual(_merge_price_tokens(tokens), [("6,090", Token("6", 45, 10, 82, 38))])
-
-    def test_price_after_a_is_a_reference_price(self):
-        tokens = [Token("à", 0, 12, 6, 24), Token("6", 9, 0, 20, 28), Token("DT", 23, 1, 31, 11), Token(",090", 20, 8, 46, 27)]
-        value, price_token = _merge_price_tokens(tokens)[0]
-        self.assertEqual(value, "6,090")
-        self.assertTrue(_is_reference_price(price_token, tokens))
 
     def test_stacked_offers_split_a_shared_grid_cell(self):
         upper = Token("5DT", 200, 70, 230, 90)
@@ -145,12 +140,21 @@ class ExportTests(unittest.TestCase):
         with target.open(encoding="utf-8-sig") as f:
             self.assertNotIn("Photo", next(csv.reader(f)))
 
+    def test_old_job_maps_remise_and_discards_old_price(self):
+        product = Product.from_dict({"id": "old", "remise": "32 %", "ancien_prix": "14,990 DT"})
+        self.assertEqual(product.pourcentage, "32 %")
+        self.assertNotIn("ancien_prix", product.to_dict())
+        self.assertNotIn("remise", product.to_dict())
+
     def test_xlsx_has_price_promo(self):
         target = self.folder / "out.xlsx"
         export_xlsx(self.products, self.folder, target, False, "all")
         wb = load_workbook(target)
         headers = [cell.value for cell in wb["Produits"][1]]
         self.assertIn("Prix promo", headers)
+        self.assertIn("Pourcentage", headers)
+        self.assertNotIn("Ancien prix", headers)
+        self.assertNotIn("Remise", headers)
         self.assertNotIn("Photo", headers)
 
 

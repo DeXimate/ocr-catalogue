@@ -53,7 +53,7 @@ def infer_catalogue_style(document: DocumentScene) -> CatalogueStyleProfile:
     by_id = {obj.id: obj for page in document.pages for obj in page.objects}
     main_prices = [fact for page in document.pages for fact in page.numeric_facts if fact.role == NumericRole.PRICE_MAIN]
     price_sizes = [max((by_id[source].font_size for source in fact.source_ids if source in by_id), default=fact.bbox.height) for fact in main_prices]
-    discount_sizes = [fact.bbox.height for page in document.pages for fact in page.numeric_facts if fact.role == NumericRole.DISCOUNT]
+    percentage_sizes = [fact.bbox.height for page in document.pages for fact in page.numeric_facts if fact.role == NumericRole.DISCOUNT]
     price_fonts = Counter(by_id[source].font_name for fact in main_prices for source in fact.source_ids if source in by_id and by_id[source].font_name)
     product_fonts = Counter(obj.font_name for obj in lines if obj.semantic_role == SemanticRole.PRODUCT_TEXT and obj.font_name)
     noise = _repeated_noise(document)
@@ -82,7 +82,7 @@ def infer_catalogue_style(document: DocumentScene) -> CatalogueStyleProfile:
         }
     profile = CatalogueStyleProfile(
         body_font_size=body_size, price_font_size=price_size,
-        discount_font_size=statistics.median(discount_sizes) if discount_sizes else body_size,
+        percentage_font_size=statistics.median(percentage_sizes) if percentage_sizes else body_size,
         price_fonts=[name for name, _ in price_fonts.most_common(5)],
         product_fonts=[name for name, _ in product_fonts.most_common(5)],
         repeated_noise=noise, alignment_modes_x=x_modes, alignment_modes_y=y_modes,
@@ -100,6 +100,6 @@ def infer_catalogue_style(document: DocumentScene) -> CatalogueStyleProfile:
             font_fit = 1.0 if any(obj.font_name in profile.price_fonts for obj in sources) else .55
             nearby_discount = any(discount.bbox.distance(fact.bbox) <= max(fact.bbox.height, discount.bbox.height) * 2.8 for discount in discounts)
             fact.confidence = min(.99, .48 + .25 * size_fit + .12 * font_fit + (.11 if nearby_discount else 0))
-            fact.evidence.extend(["style_prix_catalogue", "remise_locale"] if nearby_discount else ["style_prix_catalogue"])
+            fact.evidence.extend(["style_prix_catalogue", "pourcentage_local"] if nearby_discount else ["style_prix_catalogue"])
     document.style = profile
     return profile

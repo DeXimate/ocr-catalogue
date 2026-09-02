@@ -78,7 +78,6 @@ class SemanticRole(str, Enum):
 
 class NumericRole(str, Enum):
     PRICE_MAIN = "PRICE_MAIN"
-    PRICE_REFERENCE = "PRICE_REFERENCE"
     CREDIT_PAYMENT = "CREDIT_PAYMENT"
     CASHBACK = "CASHBACK"
     DISCOUNT = "DISCOUNT"
@@ -146,7 +145,7 @@ class PageScene:
 class CatalogueStyleProfile:
     body_font_size: float = 0.0
     price_font_size: float = 0.0
-    discount_font_size: float = 0.0
+    percentage_font_size: float = 0.0
     price_fonts: list[str] = field(default_factory=list)
     product_fonts: list[str] = field(default_factory=list)
     repeated_noise: set[str] = field(default_factory=set)
@@ -190,8 +189,7 @@ class Offer:
     variant: str = ""
     quantity: str = ""
     main_price: str = ""
-    reference_price: str = ""
-    discount: str = ""
+    percentage: str = ""
     promotion: str = ""
     cashback: str = ""
     price_basis: str = ""

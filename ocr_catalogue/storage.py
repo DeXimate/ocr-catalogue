@@ -48,7 +48,10 @@ def save_job(job_id: str, payload: dict) -> None:
 
 def load_job(job_id: str) -> dict:
     with _lock:
-        return json.loads((job_folder(job_id) / "job.json").read_text(encoding="utf-8"))
+        job = json.loads((job_folder(job_id) / "job.json").read_text(encoding="utf-8"))
+        if "products" in job:
+            job["products"] = [Product.from_dict(value).to_dict() for value in job.get("products", [])]
+        return job
 
 
 def list_jobs() -> list[dict]:
@@ -74,4 +77,3 @@ def copy_upload(job_id: str, source: Path, suffix: str) -> Path:
     destination = job_folder(job_id) / ("source" + suffix.lower())
     shutil.copyfile(source, destination)
     return destination
-

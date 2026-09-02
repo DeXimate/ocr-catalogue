@@ -26,7 +26,7 @@ def main() -> None:
         if product.marque in {"JUDY", "ALWAYS", "PAMPERS"} or product.produit in {
             "Couches bébé", "Préparation pâte à pizza", "Yaourt aromatisé", "Saucisson à l’ail", "Poulet rôti"
         }:
-            print(product.produit, product.marque, product.prix_promo, product.ancien_prix, product.page, product.bbox, product.crop_mode, product.photo)
+            print(product.produit, product.marque, product.prix_promo, product.pourcentage, product.page, product.bbox, product.crop_mode, product.photo)
 
 
 if __name__ == "__main__":

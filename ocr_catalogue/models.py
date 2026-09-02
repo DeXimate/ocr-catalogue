@@ -15,8 +15,7 @@ class Product:
     modele: str = ""
     quantite: str = ""
     prix_promo: str = ""
-    ancien_prix: str = ""
-    remise: str = ""
+    pourcentage: str = ""
     promotion: str = ""
     cashback: str = ""
     price_basis: str = ""
@@ -34,5 +33,10 @@ class Product:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "Product":
+        value = dict(value)
+        if not value.get("pourcentage") and value.get("remise"):
+            value["pourcentage"] = value["remise"]
+        value.pop("ancien_prix", None)
+        value.pop("remise", None)
         allowed = cls.__dataclass_fields__.keys()
         return cls(**{key: value[key] for key in allowed if key in value})
