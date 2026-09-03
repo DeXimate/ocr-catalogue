@@ -55,38 +55,33 @@ def request_cancel(job_id: str) -> dict:
 
 
 def finalize_cancelled_job(job_id: str) -> dict:
+    """Permanently delete the cancelled catalogue from the application."""
     folder = job_folder(job_id)
     with _lock:
-        job = load_job(job_id)
-        source = next((path for path in folder.glob("source.*") if path.is_file()), None)
-        if source is None:
-            raise FileNotFoundError("Le fichier source importé est introuvable")
+        metadata = folder / "job.json"
+        deleting_metadata = folder / "job.deleting.json"
 
-        marker = _cancel_marker(job_id)
-        trash = folder / f".cancel-trash-{uuid.uuid4().hex}"
-        trash.mkdir()
-        preserve = {source.resolve(), (folder / "job.json").resolve(), marker.resolve(), trash.resolve()}
+        if metadata.is_file():
+            job = json.loads(metadata.read_text(encoding="utf-8"))
+            filename = job.get("filename", "")
+            (folder / ".delete-requested").write_text(job_id, encoding="ascii")
+            metadata.replace(deleting_metadata)
+        elif deleting_metadata.is_file():
+            job = json.loads(deleting_metadata.read_text(encoding="utf-8"))
+            filename = job.get("filename", "")
+        elif not folder.exists():
+            return {"id": job_id, "status": "deleted"}
+        else:
+            filename = ""
 
-        for child in list(folder.iterdir()):
-            if child.resolve() in preserve:
-                continue
-            child.replace(trash / child.name)
+        _deletions[job_id] = {"id": job_id, "status": "deleting"}
+        threading.Thread(
+            target=_remove_tree_eventually,
+            args=(folder, job_id),
+            daemon=True,
+        ).start()
 
-        for name in ("pages", "crops", "products"):
-            (folder / name).mkdir(exist_ok=True)
-
-        marker.unlink(missing_ok=True)
-        job.update(
-            status="Annulé",
-            progress=0,
-            products=[],
-            error="",
-            asset_version=uuid.uuid4().hex,
-        )
-        save_job(job_id, job)
-        threading.Thread(target=_remove_stale_tree, args=(trash,), daemon=True).start()
-        return {"id": job_id, "filename": job.get("filename", ""), "status": "Annulé", "progress": 0}
-
+    return {"id": job_id, "filename": filename, "status": "deleting"}
 
 def ensure_dirs() -> None:
     global _cleanup_started

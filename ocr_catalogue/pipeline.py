@@ -127,7 +127,11 @@ def extract_offers(source: Path, folder: Path, raster_pages: list[Path], progres
             progress(offer.page, len(document.pages))
     if cancel:
         cancel()
+    if cancel:
+        cancel()
     diagnostic_images = _write_diagnostic_contact_sheets(products, folder)
+    if cancel:
+        cancel()
     if cancel:
         cancel()
     audit = {
