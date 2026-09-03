@@ -20,7 +20,6 @@ TECHNICAL = re.compile(r"\b\d+(?:[,.]\d+)?\s*(?:watts?|w|btu|tours?|hz|v|usb|cm|
 TECHNICAL_ONLY = re.compile(
     r"^\s*(?:\d+\s*(?:mois|ans?)\s*)+$|"
     r"^\s*(?:\d+\s*(?:couverts?|programmes?)\s*)+$|"
-    r"^\s*\d+(?:[,.]\d+)?\s*feux?\s*$|"
     r"^\s*chaud\s*/\s*froid\s*$",
     re.I,
 )

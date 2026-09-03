@@ -1,12 +1,18 @@
 import csv
+import shutil
+import stat
 import unittest
+import uuid
+import time
 from pathlib import Path
+from unittest.mock import patch
 
 from openpyxl import load_workbook
 
 from ocr_catalogue.engines import Token, _cashback_promotion, _dedupe_overprint_digits, _embedded_product_bbox, _group_lines, _merge_price_tokens, _partition_region_by_anchors, _text_fields, _valid_product_region
 from ocr_catalogue.exporter import export_csv, export_xlsx
 from ocr_catalogue.models import Product
+from ocr_catalogue import storage
 
 
 class ExtractionTests(unittest.TestCase):
@@ -156,6 +162,41 @@ class ExportTests(unittest.TestCase):
         self.assertNotIn("Ancien prix", headers)
         self.assertNotIn("Remise", headers)
         self.assertNotIn("Photo", headers)
+
+
+class StorageTests(unittest.TestCase):
+    def isolated_jobs(self):
+        root = Path("data") / f"test-delete-{uuid.uuid4().hex}"
+        self.addCleanup(shutil.rmtree, root, True)
+        return root / "jobs"
+
+    def test_delete_job_removes_source_and_all_derived_files(self):
+        with patch.object(storage, "JOBS", self.isolated_jobs()):
+            job_id, folder = storage.new_job("catalogue.pdf")
+            (folder / "source.pdf").write_bytes(b"pdf")
+            (folder / "products" / "photo.png").write_bytes(b"image")
+            (folder / "products" / "photo.png").chmod(stat.S_IREAD)
+            job = storage.load_job(job_id)
+            job["status"] = "Terminé"
+            storage.save_job(job_id, job)
+
+            result = storage.delete_job(job_id)
+
+            self.assertEqual(result["status"], "deleting")
+            self.assertFalse((folder / "job.json").exists())
+            for _ in range(50):
+                if not folder.exists():
+                    break
+                time.sleep(.02)
+            self.assertFalse(folder.exists())
+            self.assertEqual(storage.deletion_status(job_id)["status"], "deleted")
+
+    def test_delete_job_rejects_active_extraction(self):
+        with patch.object(storage, "JOBS", self.isolated_jobs()):
+            job_id, folder = storage.new_job("catalogue.pdf")
+            with self.assertRaises(RuntimeError):
+                storage.delete_job(job_id)
+            self.assertTrue(folder.exists())
 
 
 if __name__ == "__main__":

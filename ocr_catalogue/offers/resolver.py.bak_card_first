@@ -9,7 +9,6 @@ from collections import defaultdict
 from ..domain import BBox, DocumentScene, NumericFact, NumericRole, Offer, OfferCandidate, PageScene, SemanticRole, VisualObject
 from ..graph import SpatialGraph, build_spatial_graph
 from ..semantics import parse_promotion
-from .panel_detector import NativePanel, detect_native_panels
 from .region_solver import RegionSolution, infer_safe_regions, solve_page_regions
 
 
@@ -87,131 +86,6 @@ def _union_boxes(boxes: list[BBox]) -> BBox:
     result = boxes[0]
     for box in boxes[1:]: result = result.union(box)
     return result
-
-
-
-def _main_price_boxes_for_candidates(page: PageScene, candidates: list[OfferCandidate]) -> dict[str, BBox]:
-    facts = {fact.id: fact for fact in page.numeric_facts}
-    result: dict[str, BBox] = {}
-    for candidate in candidates:
-        main = next(
-            (
-                facts[fact_id]
-                for fact_id in candidate.numeric_ids
-                if fact_id in facts and facts[fact_id].role == NumericRole.PRICE_MAIN
-            ),
-            None,
-        )
-        if main is not None:
-            result[candidate.id] = main.bbox
-    return result
-
-
-def _suppress_unpriced_inside_native_panels(
-    page: PageScene,
-    candidates: list[OfferCandidate],
-    native_panels: dict[str, NativePanel],
-) -> None:
-    """One priced native card must never spawn a second unpriced OFFER."""
-    if not native_panels:
-        return
-    facts = {fact.id: fact for fact in page.numeric_facts}
-    panel_boxes = [panel.bbox for panel in native_panels.values()]
-    kept = []
-    for candidate in candidates:
-        has_main = any(
-            fact_id in facts and facts[fact_id].role == NumericRole.PRICE_MAIN
-            for fact_id in candidate.numeric_ids
-        )
-        if has_main or candidate.bbox is None:
-            kept.append(candidate)
-            continue
-        inside_priced_card = any(
-            panel.contains_point(candidate.bbox.cx, candidate.bbox.cy, 1.0)
-            for panel in panel_boxes
-        )
-        if not inside_priced_card:
-            kept.append(candidate)
-    candidates[:] = kept
-
-
-def _lock_native_panel_contents(
-    page: PageScene,
-    candidates: list[OfferCandidate],
-    native_panels: dict[str, NativePanel],
-) -> None:
-    """Make exact native-card containment stronger than graph proximity."""
-    if not native_panels:
-        return
-
-    by_id = {candidate.id: candidate for candidate in candidates}
-    eligible_roles = {
-        SemanticRole.PRODUCT_TEXT,
-        SemanticRole.BRAND,
-        SemanticRole.ARABIC_TEXT,
-        SemanticRole.QUANTITY,
-        SemanticRole.MODEL,
-        SemanticRole.PROMOTION,
-        SemanticRole.PRICE_BASIS,
-        SemanticRole.TECHNICAL_SPEC,
-    }
-
-    protected_object_ids = {
-        obj.id
-        for obj in page.objects
-        if obj.raw_type in {"line", "image"}
-        and any(
-            panel.bbox.contains_point(obj.bbox.cx, obj.bbox.cy, 1.0)
-            for panel in native_panels.values()
-        )
-    }
-    protected_secondary_ids = {
-        fact.id
-        for fact in page.numeric_facts
-        if fact.role != NumericRole.PRICE_MAIN
-        and any(
-            panel.bbox.contains_point(fact.bbox.cx, fact.bbox.cy, 1.0)
-            for panel in native_panels.values()
-        )
-    }
-
-    for candidate in candidates:
-        candidate.object_ids = [
-            obj_id for obj_id in candidate.object_ids
-            if obj_id not in protected_object_ids
-        ]
-        candidate.numeric_ids = [
-            fact_id for fact_id in candidate.numeric_ids
-            if fact_id not in protected_secondary_ids
-        ]
-
-    for candidate_id, panel in native_panels.items():
-        candidate = by_id.get(candidate_id)
-        if candidate is None:
-            continue
-        box = panel.bbox
-
-        for obj in page.objects:
-            if not box.contains_point(obj.bbox.cx, obj.bbox.cy, 1.0):
-                continue
-            if obj.raw_type == "line" and obj.semantic_role in eligible_roles:
-                if obj.id not in candidate.object_ids:
-                    candidate.object_ids.append(obj.id)
-                candidate.assignments[obj.id] = 1.0
-            elif (
-                obj.semantic_role == SemanticRole.IMAGE
-                and obj.bbox.area <= box.area * .92
-                and obj.id not in candidate.object_ids
-            ):
-                candidate.object_ids.append(obj.id)
-                candidate.assignments[obj.id] = .95
-
-        for fact in page.numeric_facts:
-            if fact.role == NumericRole.PRICE_MAIN:
-                continue
-            if box.contains_point(fact.bbox.cx, fact.bbox.cy, 1.0):
-                if fact.id not in candidate.numeric_ids:
-                    candidate.numeric_ids.append(fact.id)
 
 
 def _assign_objects(page: PageScene, graph: SpatialGraph, candidates: list[OfferCandidate]) -> None:
@@ -931,21 +805,9 @@ def resolve_document_offers(document: DocumentScene) -> list[Offer]:
     for page in document.pages:
         graph = build_spatial_graph(page, document.style)
         candidates = _offer_candidates(page, graph)
-
-        # CARD FIRST: discover exact vector cards from geometry + PRICE_MAIN
-        # ownership before graph-based semantic assignment.
-        main_price_boxes = _main_price_boxes_for_candidates(page, candidates)
-        native_panels = detect_native_panels(page, candidates, {}, main_price_boxes)
-        _suppress_unpriced_inside_native_panels(page, candidates, native_panels)
-
         _assign_objects(page, graph, candidates)
         _merge_product_with_priced_brand(page, candidates)
         _reassign_secondary_facts(page, candidates)
-
-        # Rebuild structured-card ownership by physical containment after all
-        # graph refinements. No neighbouring cell can leak back in afterwards.
-        _lock_native_panel_contents(page, candidates, native_panels)
-
         region_solutions = solve_page_regions(page, candidates)
         page_offers = _assemble(page, candidates, graph, document.style, region_solutions)
         # Reject isolated numeric ornaments and folio fragments.  The minimum

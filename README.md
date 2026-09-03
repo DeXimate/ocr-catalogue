@@ -10,7 +10,7 @@ Application locale Windows pour extraire les produits et prix promotionnels de c
 
 Puis ouvrir <http://127.0.0.1:8765>.
 
-`launch.ps1` démarre le serveur en arrière-plan et ouvre automatiquement le navigateur par défaut. Il est utilisé par le raccourci du Bureau.
+`launch.vbs` est utilisé par le raccourci du Bureau pour masquer complètement PowerShell et Windows Terminal. Il démarre `launch.ps1`, qui ouvre le navigateur par défaut et conserve uniquement une petite fenêtre de contrôle. Le bouton **Arrêter le serveur** ferme proprement le service local. La fermeture de la fenêtre demande également si le serveur doit être arrêté.
 
 Le script utilise en priorité le runtime Python fourni avec Codex. Un Python 3.11+ avec `pypdf`, `pdfplumber`, `Pillow`, `numpy` et `openpyxl` convient également.
 
@@ -23,6 +23,7 @@ Le script utilise en priorité le runtime Python fourni avec Codex. Un Python 3.
 - édition, sélection et validation en masse ;
 - export XLSX avec images embarquées ou CSV avec chemins relatifs ;
 - stockage local dans `data/` et reprise des traitements.
+- suppression définitive d’un catalogue importé et de tous ses fichiers dérivés depuis l’interface ;
 
 Les PDF scannés et images sans texte natif sont importés et signalés pour revue. Le connecteur OCR local est prévu dans `ocr_catalogue/engines.py`; PaddleOCR/Tesseract peuvent y être activés sans modifier l'interface.
 

@@ -419,12 +419,8 @@ def _resolve_page_conflicts(solutions: dict[str, RegionSolution]) -> None:
                 first, second = (left, right) if dy > 0 else (right, left)
                 proposed_first = BBox(first.region.x0, first.region.top, first.region.x1, min(first.region.bottom, boundary))
                 proposed_second = BBox(second.region.x0, max(second.region.top, boundary), second.region.x1, second.region.bottom)
-            # A proven native PDF card is an absolute boundary. Conflict
-            # reconciliation may shrink FREE_LAYOUT regions, never the card.
-            if first.mode != "panel_native" and proposed_first.contains(first.semantic_core):
-                first.region = proposed_first
-            if second.mode != "panel_native" and proposed_second.contains(second.semantic_core):
-                second.region = proposed_second
+            if proposed_first.contains(first.semantic_core): first.region = proposed_first
+            if proposed_second.contains(second.semantic_core): second.region = proposed_second
 
 
 def _clip_foreign_point(region: BBox, core: BBox, x: float, y: float) -> BBox:
@@ -449,12 +445,6 @@ def _clip_foreign_point(region: BBox, core: BBox, x: float, y: float) -> BBox:
 def _enforce_exclusivity(page: PageScene, solutions: dict[str, RegionSolution], nuclei: dict[str, BBox], main_prices: dict[str, BBox]) -> None:
     """Final invariant pass over all regions after page-level reconciliation."""
     for offer_id, solution in solutions.items():
-        # Native structured cards were proven from vector geometry + unique
-        # PRICE_MAIN ownership. Semantic mistakes in neighbouring candidates
-        # must never clip these exact PDF boundaries afterwards.
-        if solution.mode == "panel_native":
-            solution.region = solution.region.clip(page.width, page.height)
-            continue
         region = solution.region
         foreign_points = [
             (box.cx, box.cy) for key, box in main_prices.items()

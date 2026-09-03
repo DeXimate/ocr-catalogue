@@ -31,6 +31,7 @@
       <div class="toolbar-actions">
         <button id="validate" class="button button-soft"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>Valider <span id="selectedCount" class="button-count hidden">0</span></button>
         <button id="save" class="button button-secondary"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h12l2 2v14H5zM8 4v6h8V4M8 20v-6h8v6"/></svg>Enregistrer</button>
+        <button id="delete" class="button button-danger"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m-9 0 1 13h10l1-13M10 11v5m4-5v5"/></svg>Supprimer</button>
         <button id="export" class="button button-primary"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v12m0 0-5-5m5 5 5-5M5 20h14"/></svg>Exporter</button>
       </div>
     </section>
@@ -62,6 +63,15 @@
       <label class="switch-row"><span><strong>Inclure les photos</strong><small>Images intégrées dans Excel, chemins dans CSV</small></span><input id="photos" type="checkbox" role="switch"></label>
       <label>Lignes à exporter<select id="scope"><option value="all">Toutes les lignes</option><option value="validated">Lignes validées</option><option value="selected">Sélection actuelle</option></select></label>
       <div class="dialog-actions"><button value="cancel" class="button button-secondary">Annuler</button><button id="confirmExport" value="default" class="button button-primary">Créer l’export</button></div>
+    </form>
+  </dialog>
+  <dialog id="deleteDialog">
+    <form method="dialog">
+      <div class="dialog-head"><div><p class="eyebrow">Suppression définitive</p><h2>Supprimer ce catalogue ?</h2></div><button value="cancel" class="icon-button" aria-label="Fermer">×</button></div>
+      <p class="dialog-copy delete-copy">Le PDF importé, les images extraites, les corrections et les exports seront supprimés définitivement de l’application.</p>
+      <div class="delete-file"><span>Catalogue</span><strong id="deleteFilename"></strong></div>
+      <p class="delete-note">Le fichier original conservé dans votre dossier Téléchargements ou OneDrive ne sera pas supprimé.</p>
+      <div class="dialog-actions"><button value="cancel" class="button button-secondary">Annuler</button><button id="confirmDelete" type="button" class="button button-danger-solid">Supprimer définitivement</button></div>
     </form>
   </dialog>
   <script src="/app.js"></script>

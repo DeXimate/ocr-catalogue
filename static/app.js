@@ -2,7 +2,9 @@ const state={job:null,products:[],timer:null,dirty:false};
 const $=selector=>document.querySelector(selector);
 
 async function api(url,options={}){
-  const response=await fetch(url,{headers:{'Content-Type':'application/json',...(options.headers||{})},...options});
+  let response;
+  try{response=await fetch(url,{headers:{'Content-Type':'application/json',...(options.headers||{})},...options})}
+  catch(error){throw new Error('Le serveur local ne répond pas. Relancez OCR Catalogue depuis le Bureau.')}
   if(!response.ok)throw new Error((await response.json().catch(()=>({}))).error||response.statusText);
   return response.json();
 }
@@ -10,6 +12,7 @@ async function api(url,options={}){
 function esc(value){return String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]))}
 function asset(path){return path?`/api/assets/${state.job.id}/${encodeURIComponent(path).replaceAll('%2F','/')}`:''}
 function selected(){return state.products.filter(product=>product.selected)}
+const wait=milliseconds=>new Promise(resolve=>setTimeout(resolve,milliseconds));
 
 function toast(message){
   const element=$('#toast');
@@ -102,6 +105,7 @@ function render(){
   $('#selectedCount').classList.toggle('hidden',!selection);
   $('#validate').disabled=!selection;
   $('#save').disabled=!hasJob;
+  $('#delete').disabled=!hasJob||['Importé','Traitement'].includes(state.job?.status);
   $('#export').disabled=!hasJob;
   $('#all').checked=Boolean(rows.length)&&rows.every(product=>product.selected);
   $('#all').indeterminate=rows.some(product=>product.selected)&&!rows.every(product=>product.selected);
@@ -127,6 +131,7 @@ $('#rows').addEventListener('click',event=>{
 $('#preview .close').onclick=()=>$('#preview').close();
 closeOnBackdrop($('#preview'));
 closeOnBackdrop($('#exportDialog'));
+closeOnBackdrop($('#deleteDialog'));
 $('#file').onchange=async event=>{
   const file=event.target.files[0];
   if(!file)return;
@@ -157,6 +162,38 @@ $('#save').onclick=async()=>{
   if(!state.job)return;
   try{await api(`/api/jobs/${state.job.id}/products`,{method:'PUT',body:JSON.stringify({products:state.products})});setDirty(false);toast('Modifications enregistrées')}
   catch(error){toast(`Enregistrement impossible : ${error.message}`)}
+};
+$('#delete').onclick=()=>{
+  if(!state.job)return;
+  $('#deleteFilename').textContent=state.job.filename||'Catalogue sans nom';
+  $('#deleteDialog').showModal();
+};
+$('#confirmDelete').onclick=async event=>{
+  const button=event.currentTarget;
+  if(!state.job)return;
+  const id=state.job.id;
+  button.disabled=true;
+  button.textContent='Suppression…';
+  try{
+    await api(`/api/jobs/${id}`,{method:'DELETE'});
+    button.textContent='Suppression complète en cours…';
+    let deletion;
+    for(let attempt=0;attempt<1200;attempt++){
+      deletion=await api(`/api/deletions/${id}`);
+      if(deletion.status==='deleted')break;
+      if(deletion.status==='error')throw new Error(deletion.error||'Suppression incomplète');
+      await wait(500);
+    }
+    if(deletion?.status!=='deleted')throw new Error('La suppression complète prend trop de temps');
+    clearTimeout(state.timer);
+    if(localStorage.getItem('ocr_catalogue_selected_job')===id)localStorage.removeItem('ocr_catalogue_selected_job');
+    state.job=null;state.products=[];setDirty(false);
+    $('#deleteDialog').close();
+    await loadJobs();
+    render();
+    toast('Catalogue et tous ses fichiers supprimés définitivement');
+  }catch(error){toast(`Suppression impossible : ${error.message}`)}
+  finally{button.disabled=false;button.textContent='Supprimer définitivement'}
 };
 $('#export').onclick=()=>{if(state.job)$('#exportDialog').showModal()};
 $('#confirmExport').onclick=async event=>{

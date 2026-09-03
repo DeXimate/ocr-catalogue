@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
+import stat
 import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -13,10 +16,51 @@ ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
 JOBS = DATA / "jobs"
 _lock = threading.RLock()
+_cleanup_started = False
+_deletions: dict[str, dict] = {}
 
 
 def ensure_dirs() -> None:
+    global _cleanup_started
     JOBS.mkdir(parents=True, exist_ok=True)
+    with _lock:
+        if not _cleanup_started:
+            _cleanup_started = True
+            for marker in JOBS.glob("*/.delete-requested"):
+                deletion_id = marker.read_text(encoding="ascii").strip()
+                _deletions[deletion_id] = {"id": deletion_id, "status": "deleting"}
+                threading.Thread(target=_remove_tree_eventually, args=(marker.parent, deletion_id), daemon=True).start()
+
+
+def _remove_tree_eventually(folder: Path, deletion_id: str) -> None:
+    """Retry a user-confirmed deletion without holding an HTTP connection."""
+    def remove_readonly(function, path, _error_info):
+        Path(path).chmod(stat.S_IWRITE)
+        function(path)
+
+    for attempt in range(120):
+        if not folder.exists():
+            with _lock:
+                _deletions[deletion_id] = {"id": deletion_id, "status": "deleted"}
+            return
+        try:
+            shutil.rmtree(folder, onerror=remove_readonly)
+            with _lock:
+                _deletions[deletion_id] = {"id": deletion_id, "status": "deleted"}
+            return
+        except FileNotFoundError:
+            with _lock:
+                _deletions[deletion_id] = {"id": deletion_id, "status": "deleted"}
+            return
+        except OSError as exc:
+            last_error = str(exc)
+            time.sleep(min(3.0, .25 + attempt * .08))
+    with _lock:
+        _deletions[deletion_id] = {
+            "id": deletion_id,
+            "status": "error",
+            "error": f"Windows n'a pas pu supprimer tous les fichiers : {last_error}",
+        }
 
 
 def new_job(filename: str) -> tuple[str, Path]:
@@ -31,6 +75,8 @@ def new_job(filename: str) -> tuple[str, Path]:
 
 
 def job_folder(job_id: str) -> Path:
+    if not re.fullmatch(r"[0-9a-f]{12}", job_id or ""):
+        raise ValueError("Identifiant invalide")
     path = (JOBS / job_id).resolve()
     if JOBS.resolve() not in path.parents:
         raise ValueError("Identifiant invalide")
@@ -71,6 +117,36 @@ def update_products(job_id: str, values: list[dict]) -> dict:
     job["products"] = [Product.from_dict(value).to_dict() for value in values]
     save_job(job_id, job)
     return job
+
+
+def delete_job(job_id: str) -> dict:
+    """Permanently remove one completed upload and every derived artifact."""
+    folder = job_folder(job_id)
+    with _lock:
+        metadata = folder / "job.json"
+        if not metadata.is_file():
+            raise FileNotFoundError(job_id)
+        job = json.loads(metadata.read_text(encoding="utf-8"))
+        if job.get("status") in {"Importé", "Traitement"}:
+            raise RuntimeError("Le catalogue est encore en cours de traitement")
+        filename = job.get("filename", "")
+        # Hide the catalogue atomically from list_jobs before deleting large
+        # image trees. This makes the UI immediate and prevents new thumbnail
+        # requests from racing with Windows/OneDrive file removal.
+        (folder / ".delete-requested").write_text(job_id, encoding="ascii")
+        metadata.replace(folder / "job.deleting.json")
+        _deletions[job_id] = {"id": job_id, "status": "deleting"}
+        threading.Thread(target=_remove_tree_eventually, args=(folder, job_id), daemon=True).start()
+    return {"id": job_id, "filename": filename, "status": "deleting"}
+
+
+def deletion_status(job_id: str) -> dict:
+    job_folder(job_id)  # validates without broadening the filesystem target
+    with _lock:
+        status = _deletions.get(job_id)
+        if status:
+            return dict(status)
+    raise FileNotFoundError(job_id)
 
 
 def copy_upload(job_id: str, source: Path, suffix: str) -> Path:
