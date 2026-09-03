@@ -877,128 +877,6 @@ def _contamination(region: BBox, own: set[str], page: PageScene, assignment_owne
     return foreign_area / max(1.0, own_area + foreign_area)
 
 
-
-# User-facing product attributes are separated from commercial pack format.
-# This avoids treating 420 litres of refrigerator capacity or 7 kg of washing
-# capacity as a retail "quantity" while keeping 2.5 litres of detergent in the
-# Format / conditionnement field.
-_APPLIANCE_PRODUCT = re.compile(
-    r"\b(?:climatiseur|r[ée]frig[ée]rateur|cong[ée]lateur|lave[- ]?linge|machine\s+[àa]\s+laver|"
-    r"lave[- ]?vaisselle|t[ée]l[ée]viseur|\btv\b|ventilateur|bouilloire|mixeur|batteur|blender|"
-    r"hachoir|friteuse|cafeti[èe]re|fer\s+[àa]\s+repasser|s[èe]che[- ]?cheveux|p[èe]se\s+personne|"
-    r"four|micro[- ]?ondes|cuisini[èe]re|r[ée]chaud|plaque|hotte|aspirateur|robot|grille[- ]?pain|"
-    r"appareil\s+\d+\s+en\s+\d+)\b",
-    re.I,
-)
-_STRONG_APPLIANCE_CUE = re.compile(
-    r"\b(?:btu|watts?|\bw\b|tours?(?:/min)?|no\s+frost|inverter|tropicalis[ée]|garantie|"
-    r"usb|hdmi|qled|oled|smart|r32|vitesses?|programmes?|couverts?|chaud\s*/\s*froid)\b",
-    re.I,
-)
-_CHARACTERISTIC_CUE = re.compile(
-    r"\b(?:btu|watts?|\bw\b|tours?(?:/min)?|hz|usb|hdmi|qled|oled|led|no\s+frost|inverter|"
-    r"tropicalis[ée]|smart|r32|vitesses?|programmes?|couverts?|chaud\s*/\s*froid|garantie|"
-    r"semelle|c[ée]ramique|inox|r[ée]cepteur|froid|capacit[ée])\b|"
-    r"\b\d+(?:[,.]\d+)?\s*(?:btu|watts?|w|tours?|hz|usb|kg|litres?|l|cm|mm|pouces?|feux?)\b",
-    re.I,
-)
-_CREDIT_ONLY = re.compile(r"\bachat\s+[àa]\s+cr[ée]dit\b|^\s*(?:\d+\s*mois\s*)+$", re.I)
-_MODEL_AFTER_BRAND = re.compile(
-    r"[”\"]\s*([A-Z0-9][A-Z0-9._/-]{2,})\b"
-)
-
-
-def _is_appliance_offer(product: str, objects: list[VisualObject]) -> bool:
-    if _APPLIANCE_PRODUCT.search(product or ""):
-        return True
-    cue_lines = {
-        obj.id for obj in objects
-        if _STRONG_APPLIANCE_CUE.search(obj.text or "")
-    }
-    return len(cue_lines) >= 2
-
-
-def _extract_model(objects: list[VisualObject]) -> str:
-    explicit = [obj.text.strip() for obj in objects if obj.semantic_role == SemanticRole.MODEL and obj.text.strip()]
-    if explicit:
-        return explicit[0]
-    # Monoprix frequently prints brand and model on the same physical line,
-    # e.g. “MAXWELL” MX-CH12T-INV4-S. The line is semantically BRAND, so recover
-    # the first alphanumeric reference immediately after the closing quote.
-    for obj in objects:
-        if obj.semantic_role != SemanticRole.BRAND:
-            continue
-        match = _MODEL_AFTER_BRAND.search(obj.text)
-        if not match:
-            continue
-        token = match.group(1).strip("-./")
-        if re.search(r"[A-Z]", token) and re.search(r"\d", token):
-            return token
-    return ""
-
-
-def _dedupe_text(values: list[str]) -> list[str]:
-    result: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        clean = re.sub(r"\s+", " ", value).strip(" -•")
-        key = re.sub(r"\W+", "", clean).lower()
-        if not clean or not key or key in seen:
-            continue
-        seen.add(key)
-        result.append(clean)
-    return result
-
-
-def _format_and_characteristics(
-    product: str,
-    objects: list[VisualObject],
-    facts: list[NumericFact],
-) -> tuple[str, list[str]]:
-    quantities = [obj.text for obj in objects if obj.semantic_role == SemanticRole.QUANTITY]
-    appliance = _is_appliance_offer(product, objects)
-
-    characteristics: list[str] = []
-    for obj in objects:
-        if obj.semantic_role != SemanticRole.TECHNICAL_SPEC:
-            continue
-        text = obj.text.strip()
-        if not text or _CREDIT_ONLY.search(text):
-            continue
-        # Do not expose generic variant copy as a technical characteristic.
-        if appliance or _CHARACTERISTIC_CUE.search(text):
-            characteristics.append(text)
-
-    # Numeric facts are kept as evidence even when line classification was
-    # imperfect. This recovers BTU, power, dimensions, duration, etc.
-    for fact in facts:
-        if fact.role not in {
-            NumericRole.POWER,
-            NumericRole.CAPACITY,
-            NumericRole.DIMENSION,
-            NumericRole.DURATION,
-            NumericRole.TECHNICAL_SPEC,
-        }:
-            continue
-        text = fact.text.strip()
-        if not text or _CREDIT_ONLY.search(text):
-            continue
-        if fact.role == NumericRole.DURATION and not re.search(r"garantie", text, re.I):
-            # Bare 18/36 months on these catalogues is usually credit duration.
-            continue
-        characteristics.append(text)
-
-    if appliance:
-        # Capacity-like lines are technical on appliances: 12000 BTU,
-        # refrigerator 420 L, washing-machine 7 kg, freezer 84 L, etc.
-        characteristics.extend(quantities)
-        retail_format = ""
-    else:
-        # Food, cleaning, hygiene and other FMCG keep their commercial pack.
-        retail_format = quantities[-1] if quantities else ""
-
-    return retail_format, _dedupe_text(characteristics)
-
 def _assemble(page: PageScene, candidates: list[OfferCandidate], graph: SpatialGraph, style, region_solutions: dict[str, RegionSolution]) -> list[Offer]:
     object_map = page.object_by_id()
     fact_map = {fact.id: fact for fact in page.numeric_facts}
@@ -1011,8 +889,9 @@ def _assemble(page: PageScene, candidates: list[OfferCandidate], graph: SpatialG
         product = _pick_product(objects, main, style)
         brands = [_brand(obj.text) for obj in objects if obj.semantic_role == SemanticRole.BRAND]
         arabic = [obj.text for obj in objects if obj.semantic_role == SemanticRole.ARABIC_TEXT]
-        quantity, technical = _format_and_characteristics(product, objects, facts)
-        model = _extract_model(objects)
+        quantities = [obj.text for obj in objects if obj.semantic_role == SemanticRole.QUANTITY]
+        models = [obj.text for obj in objects if obj.semantic_role == SemanticRole.MODEL]
+        technical = [obj.text for obj in objects if obj.semantic_role == SemanticRole.TECHNICAL_SPEC]
         cashback = next((fact for fact in facts if fact.role == NumericRole.CASHBACK), None)
         percentage = next((fact for fact in facts if fact.role == NumericRole.DISCOUNT), None)
         credit = next((fact for fact in facts if fact.role == NumericRole.CREDIT_PAYMENT), None)
@@ -1034,8 +913,8 @@ def _assemble(page: PageScene, candidates: list[OfferCandidate], graph: SpatialG
             id=uuid.uuid4().hex[:10], page=page.number, bbox=region,
             object_ids=candidate.object_ids, image_ids=[obj.id for obj in objects if obj.semantic_role == SemanticRole.IMAGE],
             product_name=product or "Produit à vérifier", arabic_name=" ".join(dict.fromkeys(arabic)),
-            brand=next((brand for brand in brands if brand), ""), model=model,
-            quantity=quantity, main_price=(main.value + " DT") if main else "",
+            brand=next((brand for brand in brands if brand), ""), model=models[0] if models else "",
+            quantity=quantities[-1] if quantities else "", main_price=(main.value + " DT") if main else "",
             percentage=(percentage.value + " %") if percentage else "",
             promotion=parse_promotion(objects, (cashback.value + " DT versés") if cashback else ""),
             cashback=(cashback.value + " DT versés") if cashback else "", price_basis=basis_obj.text if basis_obj else "",

@@ -38,7 +38,6 @@ def _to_product(offer: Offer, crop_rel: str, product_rel: str) -> Product:
         id=offer.id, photo=product_rel, source_crop=crop_rel,
         produit=offer.product_name, designation_ar=offer.arabic_name,
         marque=offer.brand, modele=offer.model, quantite=offer.quantity,
-        caracteristiques=" • ".join(offer.technical_specs),
         prix_promo=offer.main_price, pourcentage=offer.percentage,
         promotion=offer.promotion,
         cashback=offer.cashback, price_basis=offer.price_basis,

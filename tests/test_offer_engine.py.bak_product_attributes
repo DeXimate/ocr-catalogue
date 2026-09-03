@@ -4,7 +4,7 @@ from ocr_catalogue.domain import BBox, DocumentScene, NumericFact, NumericRole, 
 from ocr_catalogue.graph import build_spatial_graph
 from ocr_catalogue.ingestion.pdf_scene import _collapse_overprint_word, _line_objects
 from ocr_catalogue.offers.panel_detector import detect_native_panels
-from ocr_catalogue.offers.resolver import _extract_model, _format_and_characteristics, _merge_product_with_priced_brand, _offer_bbox, _offer_candidates, _partition_container, _pick_product, _reassign_secondary_facts
+from ocr_catalogue.offers.resolver import _merge_product_with_priced_brand, _offer_bbox, _offer_candidates, _partition_container, _pick_product, _reassign_secondary_facts
 from ocr_catalogue.offers.region_solver import build_offer_nuclei, solve_page_regions
 from ocr_catalogue.pipeline import _to_product
 from ocr_catalogue.semantics.classifier import _classify_lines, _classify_non_price_numbers, _find_prices, parse_promotion
@@ -96,32 +96,6 @@ class OfferEngineTests(unittest.TestCase):
         page = PageScene(1, 300, 500, lines)
         _classify_lines(page)
         self.assertTrue(all(line.semantic_role == SemanticRole.TECHNICAL_SPEC for line in lines))
-
-    def test_appliance_capacity_moves_to_characteristics_not_format(self):
-        product = VisualObject("product", 1, "line", BBox(0, 0, 90, 12), text="Réfrigérateur 2 portes", semantic_role=SemanticRole.PRODUCT_TEXT)
-        capacity = VisualObject("capacity", 1, "line", BBox(0, 20, 70, 32), text="420 LITRES", semantic_role=SemanticRole.QUANTITY)
-        frost = VisualObject("frost", 1, "line", BBox(0, 40, 80, 52), text="NO FROST", semantic_role=SemanticRole.TECHNICAL_SPEC)
-        retail_format, characteristics = _format_and_characteristics("Réfrigérateur 2 portes", [product, capacity, frost], [])
-        self.assertEqual(retail_format, "")
-        self.assertIn("420 LITRES", characteristics)
-        self.assertIn("NO FROST", characteristics)
-
-    def test_fmcg_volume_stays_in_format(self):
-        product = VisualObject("product", 1, "line", BBox(0, 0, 90, 12), text="Lessive liquide machine", semantic_role=SemanticRole.PRODUCT_TEXT)
-        volume = VisualObject("volume", 1, "line", BBox(0, 20, 70, 32), text="2,35 litres", semantic_role=SemanticRole.QUANTITY)
-        retail_format, characteristics = _format_and_characteristics("Lessive liquide machine", [product, volume], [])
-        self.assertEqual(retail_format, "2,35 litres")
-        self.assertEqual(characteristics, [])
-
-    def test_btu_is_exposed_as_appliance_characteristic(self):
-        product = VisualObject("product", 1, "line", BBox(0, 0, 90, 12), text="Climatiseur", semantic_role=SemanticRole.PRODUCT_TEXT)
-        btu = VisualObject("btu", 1, "line", BBox(0, 20, 80, 32), text="12000 BTU", semantic_role=SemanticRole.TECHNICAL_SPEC)
-        _, characteristics = _format_and_characteristics("Climatiseur", [product, btu], [])
-        self.assertIn("12000 BTU", characteristics)
-
-    def test_model_is_recovered_from_brand_line(self):
-        brand = VisualObject("brand", 1, "line", BBox(0, 0, 180, 12), text='“MAXWELL” MX-CH12T-INV4-S', semantic_role=SemanticRole.BRAND)
-        self.assertEqual(_extract_model([brand]), "MX-CH12T-INV4-S")
 
     def test_classifier_accepts_only_explicit_free_mechanism(self):
         line = VisualObject("promo", 1, "line", BBox(0, 0, 100, 12), text="2+1 GRATUIT", font_size=10, font_name="Bold")

@@ -14,7 +14,6 @@ class Product:
     marque: str = ""
     modele: str = ""
     quantite: str = ""
-    caracteristiques: str = ""
     prix_promo: str = ""
     pourcentage: str = ""
     promotion: str = ""

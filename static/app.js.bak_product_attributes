@@ -160,7 +160,7 @@ function render(){
     <tr data-id="${product.id}" class="${product.statut==='Validé'?'':'review-row'}">
       <td class="check-cell"><input type="checkbox" data-key="selected" aria-label="Sélectionner ${esc(product.produit)}" ${product.selected?'checked':''}></td>
       <td><img class="thumb" src="${asset(product.photo)}" data-source="${asset(product.source_crop||product.photo)}" alt="${esc(product.produit)}" loading="lazy"></td>
-      ${['produit','marque','modele','quantite','caracteristiques','prix_promo','pourcentage','promotion'].map(key=>editableCell(product,key)).join('')}
+      ${['produit','marque','quantite','prix_promo','pourcentage','promotion'].map(key=>editableCell(product,key)).join('')}
       <td>${product.page}</td>
       <td><span class="confidence ${product.confiance>=85?'valid':''}">${product.confiance}%</span></td>
       <td><select class="status-select" data-key="statut" aria-label="Statut de ${esc(product.produit)}"><option ${product.statut==='À vérifier'?'selected':''}>À vérifier</option><option ${product.statut==='Validé'?'selected':''}>Validé</option></select></td>

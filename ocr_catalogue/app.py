@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import re
 import tempfile
 import threading
 from email.parser import BytesParser
@@ -21,6 +22,16 @@ ROOT = Path(__file__).resolve().parent.parent
 STATIC = ROOT / "static"
 _processing_jobs: set[str] = set()
 _processing_lock = threading.RLock()
+
+
+def export_download_name(uploaded_filename: str, fmt: str) -> str:
+    """Build a readable, Windows-safe download name from the upload name."""
+    stem = Path(uploaded_filename or "").stem.strip()
+    stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", stem)
+    stem = re.sub(r"\s+", " ", stem).strip(" .")
+    if not stem:
+        stem = "catalogue"
+    return f"produits-{stem[:140]}.{fmt}"
 
 
 def process_job(job_id: str, source: Path) -> None:
@@ -176,7 +187,7 @@ class Handler(BaseHTTPRequestHandler):
             job_id = parts[2]
             options = self._body()
             job = storage.load_job(job_id)
-            fmt = options.get("format", "xlsx")
+            fmt = "csv" if options.get("format") == "csv" else "xlsx"
             include = bool(options.get("include_photos"))
             scope = options.get("scope", "all")
             target = storage.job_folder(job_id) / f"export.{fmt}"
@@ -184,7 +195,10 @@ class Handler(BaseHTTPRequestHandler):
                 export_csv(job["products"], storage.job_folder(job_id), target, include, scope)
             else:
                 export_xlsx(job["products"], storage.job_folder(job_id), target, include, scope)
-            return self._json({"url": f"/api/assets/{job_id}/{target.name}", "filename": f"produits-{job_id}.{fmt}"})
+            return self._json({
+                "url": f"/api/assets/{job_id}/{target.name}",
+                "filename": export_download_name(job.get("filename", ""), fmt),
+            })
         self.send_error(404)
 
     def do_PUT(self):

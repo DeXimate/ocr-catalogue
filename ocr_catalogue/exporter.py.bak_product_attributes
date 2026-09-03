@@ -6,15 +6,14 @@ from pathlib import Path
 from openpyxl import Workbook
 from openpyxl.drawing.image import Image as ExcelImage
 from openpyxl.styles import Font, PatternFill
-from openpyxl.utils import get_column_letter
 
 
 COLUMNS = [
     ("photo", "Photo"), ("produit", "Produit"), ("marque", "Marque"),
-    ("modele", "Modèle"), ("quantite", "Format / conditionnement"),
-    ("caracteristiques", "Caractéristiques"), ("prix_promo", "Prix promo"),
-    ("pourcentage", "Pourcentage"), ("promotion", "Promotion"),
-    ("page", "Page"), ("confiance", "Confiance"), ("statut", "Statut"),
+    ("quantite", "Quantité"), ("prix_promo", "Prix promo"),
+    ("pourcentage", "Pourcentage"),
+    ("promotion", "Promotion"), ("page", "Page"),
+    ("confiance", "Confiance"), ("statut", "Statut"),
 ]
 
 
@@ -57,14 +56,9 @@ def export_xlsx(products: list[dict], folder: Path, target: Path, include_photos
                 image.thumbnail(76, 66)
                 ws.add_image(image, f"A{row_index}")
                 ws.row_dimensions[row_index].height = 54
-    widths = {
-        "Photo": 14, "Produit": 30, "Marque": 18, "Modèle": 22,
-        "Format / conditionnement": 24, "Caractéristiques": 48,
-        "Prix promo": 16, "Pourcentage": 16, "Promotion": 28,
-        "Page": 10, "Confiance": 12, "Statut": 14,
-    }
-    for index, (_, label) in enumerate(columns, start=1):
-        ws.column_dimensions[get_column_letter(index)].width = widths.get(label, 16)
+    widths = {"A": 14, "B": 34, "C": 20, "D": 18, "E": 16, "F": 16, "G": 12, "H": 28}
+    for key, width in widths.items():
+        ws.column_dimensions[key].width = width
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = ws.dimensions
     review = wb.create_sheet("À vérifier")

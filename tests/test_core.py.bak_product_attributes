@@ -160,10 +160,6 @@ class ExportTests(unittest.TestCase):
         headers = [cell.value for cell in wb["Produits"][1]]
         self.assertIn("Prix promo", headers)
         self.assertIn("Pourcentage", headers)
-        self.assertIn("Format / conditionnement", headers)
-        self.assertIn("Caractéristiques", headers)
-        self.assertIn("Modèle", headers)
-        self.assertNotIn("Quantité", headers)
         self.assertNotIn("Ancien prix", headers)
         self.assertNotIn("Remise", headers)
         self.assertNotIn("Photo", headers)
