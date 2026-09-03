@@ -12,7 +12,8 @@ from openpyxl.utils import get_column_letter
 COLUMNS = [
     ("photo", "Photo"), ("produit", "Produit"), ("marque", "Marque"),
     ("modele", "Modèle"), ("quantite", "Format / conditionnement"),
-    ("caracteristiques", "Caractéristiques"), ("prix_promo", "Prix promo"),
+    ("caracteristiques", "Caractéristiques"),
+    ("variantes_prix", "Variantes / autres prix"), ("prix_promo", "Prix promo"),
     ("pourcentage", "Pourcentage"), ("promotion", "Promotion"),
     ("page", "Page"), ("confiance", "Confiance"), ("statut", "Statut"),
 ]
@@ -60,7 +61,8 @@ def export_xlsx(products: list[dict], folder: Path, target: Path, include_photos
     widths = {
         "Photo": 14, "Produit": 30, "Marque": 18, "Modèle": 22,
         "Format / conditionnement": 24, "Caractéristiques": 48,
-        "Prix promo": 16, "Pourcentage": 16, "Promotion": 28,
+        "Variantes / autres prix": 42, "Prix promo": 16,
+        "Pourcentage": 16, "Promotion": 28,
         "Page": 10, "Confiance": 12, "Statut": 14,
     }
     for index, (_, label) in enumerate(columns, start=1):

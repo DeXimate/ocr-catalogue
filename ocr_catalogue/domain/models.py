@@ -78,6 +78,7 @@ class SemanticRole(str, Enum):
 
 class NumericRole(str, Enum):
     PRICE_MAIN = "PRICE_MAIN"
+    VARIANT_PRICE = "VARIANT_PRICE"
     CREDIT_PAYMENT = "CREDIT_PAYMENT"
     CASHBACK = "CASHBACK"
     DISCOUNT = "DISCOUNT"

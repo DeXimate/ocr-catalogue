@@ -950,6 +950,29 @@ def _dedupe_text(values: list[str]) -> list[str]:
     return result
 
 
+def _variant_prices(facts: list[NumericFact]) -> str:
+    # Render alternative commercial variants without mixing them with specs.
+    items: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for fact in facts:
+        legacy_variant = "prix_variante_non_exporte" in fact.evidence
+        if fact.role != NumericRole.VARIANT_PRICE and not legacy_variant:
+            continue
+        label = next(
+            (evidence.split(":", 1)[1].strip() for evidence in fact.evidence if evidence.startswith("variant_label:")),
+            "",
+        )
+        value = fact.value.strip()
+        if not value:
+            continue
+        key = (re.sub(r"\W+", "", label).lower(), value)
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append(f"{label} : {value} DT" if label else f"Autre variante : {value} DT")
+    return " • ".join(items)
+
+
 def _format_and_characteristics(
     product: str,
     objects: list[VisualObject],
@@ -972,6 +995,9 @@ def _format_and_characteristics(
     # Numeric facts are kept as evidence even when line classification was
     # imperfect. This recovers BTU, power, dimensions, duration, etc.
     for fact in facts:
+        # Variant prices belong to their own commercial field, never characteristics.
+        if fact.role == NumericRole.VARIANT_PRICE or "prix_variante_non_exporte" in fact.evidence:
+            continue
         if fact.role not in {
             NumericRole.POWER,
             NumericRole.CAPACITY,
@@ -1013,6 +1039,7 @@ def _assemble(page: PageScene, candidates: list[OfferCandidate], graph: SpatialG
         arabic = [obj.text for obj in objects if obj.semantic_role == SemanticRole.ARABIC_TEXT]
         quantity, technical = _format_and_characteristics(product, objects, facts)
         model = _extract_model(objects)
+        variant_prices = _variant_prices(facts)
         cashback = next((fact for fact in facts if fact.role == NumericRole.CASHBACK), None)
         percentage = next((fact for fact in facts if fact.role == NumericRole.DISCOUNT), None)
         credit = next((fact for fact in facts if fact.role == NumericRole.CREDIT_PAYMENT), None)
@@ -1034,7 +1061,7 @@ def _assemble(page: PageScene, candidates: list[OfferCandidate], graph: SpatialG
             id=uuid.uuid4().hex[:10], page=page.number, bbox=region,
             object_ids=candidate.object_ids, image_ids=[obj.id for obj in objects if obj.semantic_role == SemanticRole.IMAGE],
             product_name=product or "Produit à vérifier", arabic_name=" ".join(dict.fromkeys(arabic)),
-            brand=next((brand for brand in brands if brand), ""), model=model,
+            brand=next((brand for brand in brands if brand), ""), model=model, variant=variant_prices,
             quantity=quantity, main_price=(main.value + " DT") if main else "",
             percentage=(percentage.value + " %") if percentage else "",
             promotion=parse_promotion(objects, (cashback.value + " DT versés") if cashback else ""),

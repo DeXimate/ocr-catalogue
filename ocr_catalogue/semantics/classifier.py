@@ -75,6 +75,58 @@ def _numeric_context(page: PageScene, bbox: BBox) -> str:
     return " ".join(obj.text for obj in _nearby_lines(page, bbox, radius))
 
 
+def _variant_descriptor(page: PageScene, bbox: BBox) -> str:
+    # Recover the descriptor attached to an alternative price from the same visual row.
+    words = [obj for obj in page.objects if obj.raw_type == "word"]
+    row_tolerance = max(12.0, bbox.height * 1.25)
+    horizontal_window = max(150.0, bbox.height * 12.0)
+    left = [
+        word for word in words
+        if word.bbox.x1 <= bbox.x0 + max(3.0, bbox.width * .06)
+        and 0 <= bbox.x0 - word.bbox.x1 <= horizontal_window
+        and abs(word.bbox.cy - bbox.cy) <= max(row_tolerance, word.font_size * 1.7)
+    ]
+    left.sort(key=lambda word: word.bbox.x0)
+    if not left:
+        return ""
+
+    at_indexes = [
+        index for index, word in enumerate(left)
+        if word.text.strip().lower().strip(":;") in {"à", "a"}
+        and bbox.x0 - word.bbox.x1 <= max(60.0, bbox.height * 4.0)
+    ]
+    if not at_indexes:
+        return ""
+    at_index = at_indexes[-1]
+
+    tokens: list[str] = []
+    boundary_found = False
+    for index in range(at_index - 1, -1, -1):
+        raw = left[index].text.strip()
+        token = raw.strip(" :;-")
+        normalized = token.lower()
+        if normalized in {"en", "et", "existe"}:
+            boundary_found = True
+            break
+        if not token:
+            continue
+        compact = token.upper().replace(" ", "")
+        if compact in {"DT", "DTT"} or "%" in token:
+            break
+        if re.fullmatch(r"\d{1,4}[,.]\d{3}", token):
+            break
+        tokens.append(token)
+        if len(tokens) >= 10:
+            break
+
+    if not boundary_found or not tokens:
+        return ""
+    descriptor = re.sub(r"\s+", " ", " ".join(reversed(tokens))).strip(" -,:;")
+    if not descriptor or re.fullmatch(r"\d+", descriptor):
+        return ""
+    return descriptor
+
+
 def _preceded_by_reference_cue(page: PageScene, bbox: BBox) -> bool:
     words = [obj for obj in page.objects if obj.raw_type == "word"]
     if any(obj.text.lower().strip(" :") in {"à", "avant"} and 0 <= bbox.x0 - obj.bbox.x1 <= max(30, obj.font_size * 4) and abs(bbox.cy - obj.bbox.cy) <= max(20, obj.font_size * 2) for obj in words):
@@ -93,8 +145,9 @@ def _price_role(page: PageScene, bbox: BBox) -> tuple[NumericRole, float, list[s
         return NumericRole.CASHBACK, .96, ["voisinage_verses"]
     if re.search(r"ACHAT\s+[ÀA]\s+CR[ÉE]DIT", context, re.I) and re.search(r"\bmois\b", context, re.I):
         return NumericRole.CREDIT_PAYMENT, .92, ["voisinage_credit"]
-    if _preceded_by_reference_cue(page, bbox):
-        return NumericRole.TECHNICAL_SPEC, .9, ["prix_variante_non_exporte"]
+    variant = _variant_descriptor(page, bbox)
+    if variant:
+        return NumericRole.VARIANT_PRICE, .95, ["prix_variante", f"variant_label:{variant}"]
     return NumericRole.PRICE_MAIN, .72, ["expression_dt_complete"]
 
 
@@ -166,7 +219,12 @@ def _find_prices(page: PageScene) -> list[NumericFact]:
             role, confidence, evidence = _price_role(page, bbox)
             candidates.append(NumericFact(f"{head.id}-{'-'.join(tail_ids)}-price", page.number, f"{amount} DT {tail_text}", value, bbox, role, confidence, [head.id, currency.id, *tail_ids], evidence))
     unique: list[NumericFact] = []
-    role_priority = {NumericRole.CASHBACK: 3, NumericRole.CREDIT_PAYMENT: 3, NumericRole.PRICE_MAIN: 1}
+    role_priority = {
+        NumericRole.CASHBACK: 4,
+        NumericRole.CREDIT_PAYMENT: 4,
+        NumericRole.VARIANT_PRICE: 2,
+        NumericRole.PRICE_MAIN: 1,
+    }
     for fact in sorted(candidates, key=lambda item: (-role_priority.get(item.role, 0), -item.confidence, item.bbox.top)):
         duplicate = next((other for other in unique if other.value == fact.value and other.bbox.distance(fact.bbox) < 3), None)
         if duplicate is None:

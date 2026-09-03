@@ -4,7 +4,7 @@ from ocr_catalogue.domain import BBox, DocumentScene, NumericFact, NumericRole, 
 from ocr_catalogue.graph import build_spatial_graph
 from ocr_catalogue.ingestion.pdf_scene import _collapse_overprint_word, _line_objects
 from ocr_catalogue.offers.panel_detector import detect_native_panels
-from ocr_catalogue.offers.resolver import _extract_model, _format_and_characteristics, _merge_product_with_priced_brand, _offer_bbox, _offer_candidates, _partition_container, _pick_product, _reassign_secondary_facts
+from ocr_catalogue.offers.resolver import _extract_model, _format_and_characteristics, _merge_product_with_priced_brand, _offer_bbox, _offer_candidates, _partition_container, _pick_product, _reassign_secondary_facts, _variant_prices
 from ocr_catalogue.offers.region_solver import build_offer_nuclei, solve_page_regions
 from ocr_catalogue.pipeline import _to_product
 from ocr_catalogue.semantics.classifier import _classify_lines, _classify_non_price_numbers, _find_prices, parse_promotion
@@ -122,6 +122,56 @@ class OfferEngineTests(unittest.TestCase):
     def test_model_is_recovered_from_brand_line(self):
         brand = VisualObject("brand", 1, "line", BBox(0, 0, 180, 12), text='“MAXWELL” MX-CH12T-INV4-S', semantic_role=SemanticRole.BRAND)
         self.assertEqual(_extract_model([brand]), "MX-CH12T-INV4-S")
+
+    def test_alternative_price_gets_dedicated_variant_role(self):
+        words = [
+            word("existe", "Existe", 0, 20, 32, 30, 10),
+            word("en", "en", 34, 20, 46, 30, 10),
+            word("small", "small", 48, 20, 78, 30, 10),
+            word("at", "à", 80, 20, 86, 30, 10),
+            word("head", "19", 90, 8, 118, 38, 28),
+            word("dt", "DT", 120, 14, 132, 26, 10),
+            word("tail", ",900", 132, 23, 160, 38, 14),
+        ]
+        page = PageScene(1, 300, 500, words + _line_objects(1, words))
+        prices = _find_prices(page)
+        variant = next(fact for fact in prices if fact.value == "19,900")
+        self.assertEqual(variant.role, NumericRole.VARIANT_PRICE)
+        self.assertIn("variant_label:small", variant.evidence)
+
+    def test_main_price_is_not_demoted_by_variant_text_below_it(self):
+        words = [
+            word("main", "25DT", 100, 20, 150, 60, 36),
+            word("main-tail", ",900", 148, 44, 180, 62, 16),
+            word("existe", "Existe", 70, 72, 100, 82, 8),
+            word("en", "en", 102, 72, 112, 82, 8),
+            word("small", "small", 114, 72, 140, 82, 8),
+            word("at", "à", 142, 72, 148, 82, 8),
+            word("variant", "19DT", 150, 68, 178, 86, 14),
+            word("variant-tail", ",900", 176, 76, 202, 88, 10),
+        ]
+        page = PageScene(1, 300, 500, words + _line_objects(1, words))
+        prices = _find_prices(page)
+        roles = {fact.value: fact.role for fact in prices}
+        self.assertEqual(roles["25,900"], NumericRole.PRICE_MAIN)
+        self.assertEqual(roles["19,900"], NumericRole.VARIANT_PRICE)
+
+    def test_variant_prices_do_not_leak_into_characteristics(self):
+        variant = NumericFact(
+            "variant", 1, "19 DT ,900", "19,900", BBox(0, 20, 50, 35),
+            NumericRole.VARIANT_PRICE, .95, evidence=["prix_variante", "variant_label:small"],
+        )
+        retail_format, characteristics = _format_and_characteristics("Couches adulte", [], [variant])
+        self.assertEqual(retail_format, "")
+        self.assertEqual(characteristics, [])
+        self.assertEqual(_variant_prices([variant]), "small : 19,900 DT")
+
+    def test_multiple_variant_prices_keep_their_descriptors(self):
+        facts = [
+            NumericFact("small", 1, "19 DT ,900", "19,900", BBox(0, 0, 10, 10), NumericRole.VARIANT_PRICE, .95, evidence=["prix_variante", "variant_label:small"]),
+            NumericFact("medium", 1, "22 DT ,900", "22,900", BBox(0, 20, 10, 30), NumericRole.VARIANT_PRICE, .95, evidence=["prix_variante", "variant_label:medium"]),
+        ]
+        self.assertEqual(_variant_prices(facts), "small : 19,900 DT • medium : 22,900 DT")
 
     def test_classifier_accepts_only_explicit_free_mechanism(self):
         line = VisualObject("promo", 1, "line", BBox(0, 0, 100, 12), text="2+1 GRATUIT", font_size=10, font_name="Bold")
