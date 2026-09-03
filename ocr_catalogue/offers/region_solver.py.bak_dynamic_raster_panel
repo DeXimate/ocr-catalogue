@@ -301,33 +301,17 @@ def _visual_envelope(page: PageScene, candidate: OfferCandidate, core: BBox, saf
         clipped = BBox(max(image.bbox.x0, safe.x0), max(image.bbox.top, safe.top), min(image.bbox.x1, safe.x1), min(image.bbox.bottom, safe.bottom))
         if clipped.width <= 0 or clipped.height <= 0:
             continue
-        # A raster is not "shared" just because it occupies a fixed
-        # percentage of the page. Large featured cards are legitimate.
-        main_prices_inside = sum(
-            fact.role == NumericRole.PRICE_MAIN
-            and image.bbox.contains_point(fact.bbox.cx, fact.bbox.cy)
-            for fact in page.numeric_facts
-        )
-        shared = main_prices_inside > 1
+        shared = image.metadata.get("page_fraction", 0) >= .04
         connected = clipped.intersects(region) or clipped.distance(region) <= math.sqrt(max(1.0, core.area))
-        if connected:
-            # The safe region remains the exclusivity fence for truly shared
-            # rasters, while single-offer rasters may recover their full visual.
+        shared_is_partitioned = safe.area <= image.bbox.area * .78
+        if (not shared and connected) or (shared and shared_is_partitioned):
             region = region.union(clipped)
     # Unassigned large rasters can be visual support for several offers. They
     # are admitted only through the safe-region clip.
     for image in page.objects:
-        if image.semantic_role != SemanticRole.IMAGE:
+        if image.semantic_role != SemanticRole.IMAGE or image.metadata.get("page_fraction", 0) < .04:
             continue
-        main_prices_inside = sum(
-            fact.role == NumericRole.PRICE_MAIN
-            and image.bbox.contains_point(fact.bbox.cx, fact.bbox.cy)
-            for fact in page.numeric_facts
-        )
-        # Only real multi-offer rasters enter this unassigned-support path.
-        if main_prices_inside <= 1:
-            continue
-        if image.bbox.contains_point(core.cx, core.cy) or image.bbox.intersects(core):
+        if (image.bbox.contains_point(core.cx, core.cy) or image.bbox.intersects(core)) and safe.area <= image.bbox.area * .78:
             clipped = BBox(max(image.bbox.x0, safe.x0), max(image.bbox.top, safe.top), min(image.bbox.x1, safe.x1), min(image.bbox.bottom, safe.bottom))
             if clipped.width > 0 and clipped.height > 0:
                 region = region.union(clipped)
@@ -344,12 +328,7 @@ def _visual_envelope(page: PageScene, candidate: OfferCandidate, core: BBox, saf
         limit_x = max(12.0, core.width * 1.15)
         limit_y = max(12.0, core.height * 1.65)
         visual_support = any(
-            image.bbox.area >= core.area * .12
-            and sum(
-                fact.role == NumericRole.PRICE_MAIN
-                and image.bbox.contains_point(fact.bbox.cx, fact.bbox.cy)
-                for fact in page.numeric_facts
-            ) <= 1
+            image.metadata.get("page_fraction", 1) < .04 and image.bbox.area >= core.area * .12
             for image in image_objects
         )
         if region.x0 > safe.x0 and visual_support and region.x0 - safe.x0 <= limit_x and raster.border_activity(region, "left"): updates["left"] = safe.x0

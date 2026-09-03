@@ -1,5 +1,29 @@
 from __future__ import annotations
 
+from pathlib import Path
+import shutil
+import sys
+
+ROOT = Path(__file__).resolve().parent
+PANEL = ROOT / "ocr_catalogue" / "offers" / "panel_detector.py"
+REGION = ROOT / "ocr_catalogue" / "offers" / "region_solver.py"
+
+
+def backup(path: Path) -> None:
+    dest = path.with_suffix(path.suffix + ".bak_dynamic_raster_panel")
+    if not dest.exists():
+        shutil.copy2(path, dest)
+
+
+def replace_once(text: str, old: str, new: str, label: str) -> str:
+    count = text.count(old)
+    if count != 1:
+        raise RuntimeError(f"{label}: motif attendu 1 fois, trouvé {count} fois")
+    return text.replace(old, new, 1)
+
+
+PANEL_CONTENT = r'''from __future__ import annotations
+
 """Dynamic native-card detection for structured catalogue pages.
 
 The important distinction is not VECTOR vs IMAGE. It is whether an object is
@@ -296,3 +320,93 @@ def detect_native_panels(
         )
 
     return result
+'''
+
+
+def patch_region() -> None:
+    text = REGION.read_text(encoding="utf-8")
+
+    old = '''        shared = image.metadata.get("page_fraction", 0) >= .04
+        connected = clipped.intersects(region) or clipped.distance(region) <= math.sqrt(max(1.0, core.area))
+        shared_is_partitioned = safe.area <= image.bbox.area * .78
+        if (not shared and connected) or (shared and shared_is_partitioned):
+            region = region.union(clipped)'''
+    new = '''        # A raster is not "shared" just because it occupies a fixed
+        # percentage of the page. Large featured cards are legitimate.
+        main_prices_inside = sum(
+            fact.role == NumericRole.PRICE_MAIN
+            and image.bbox.contains_point(fact.bbox.cx, fact.bbox.cy)
+            for fact in page.numeric_facts
+        )
+        shared = main_prices_inside > 1
+        connected = clipped.intersects(region) or clipped.distance(region) <= math.sqrt(max(1.0, core.area))
+        if connected:
+            # The safe region remains the exclusivity fence for truly shared
+            # rasters, while single-offer rasters may recover their full visual.
+            region = region.union(clipped)'''
+    text = replace_once(text, old, new, "replace static shared-image rule")
+
+    old = '''    for image in page.objects:
+        if image.semantic_role != SemanticRole.IMAGE or image.metadata.get("page_fraction", 0) < .04:
+            continue
+        if (image.bbox.contains_point(core.cx, core.cy) or image.bbox.intersects(core)) and safe.area <= image.bbox.area * .78:
+            clipped = BBox(max(image.bbox.x0, safe.x0), max(image.bbox.top, safe.top), min(image.bbox.x1, safe.x1), min(image.bbox.bottom, safe.bottom))
+            if clipped.width > 0 and clipped.height > 0:
+                region = region.union(clipped)'''
+    new = '''    for image in page.objects:
+        if image.semantic_role != SemanticRole.IMAGE:
+            continue
+        main_prices_inside = sum(
+            fact.role == NumericRole.PRICE_MAIN
+            and image.bbox.contains_point(fact.bbox.cx, fact.bbox.cy)
+            for fact in page.numeric_facts
+        )
+        # Only real multi-offer rasters enter this unassigned-support path.
+        if main_prices_inside <= 1:
+            continue
+        if image.bbox.contains_point(core.cx, core.cy) or image.bbox.intersects(core):
+            clipped = BBox(max(image.bbox.x0, safe.x0), max(image.bbox.top, safe.top), min(image.bbox.x1, safe.x1), min(image.bbox.bottom, safe.bottom))
+            if clipped.width > 0 and clipped.height > 0:
+                region = region.union(clipped)'''
+    text = replace_once(text, old, new, "replace static unassigned-raster rule")
+
+    old = '''        visual_support = any(
+            image.metadata.get("page_fraction", 1) < .04 and image.bbox.area >= core.area * .12
+            for image in image_objects
+        )'''
+    new = '''        visual_support = any(
+            image.bbox.area >= core.area * .12
+            and sum(
+                fact.role == NumericRole.PRICE_MAIN
+                and image.bbox.contains_point(fact.bbox.cx, fact.bbox.cy)
+                for fact in page.numeric_facts
+            ) <= 1
+            for image in image_objects
+        )'''
+    text = replace_once(text, old, new, "replace static visual-support threshold")
+
+    REGION.write_text(text, encoding="utf-8")
+
+
+def main() -> None:
+    for path in (PANEL, REGION):
+        if not path.exists():
+            raise RuntimeError(f"Fichier introuvable: {path}")
+        backup(path)
+
+    PANEL.write_text(PANEL_CONTENT, encoding="utf-8")
+    patch_region()
+
+    print("DYNAMIC RASTER PANEL FIX APPLIQUE")
+    print(" - ocr_catalogue/offers/panel_detector.py")
+    print(" - ocr_catalogue/offers/region_solver.py")
+    print()
+    print(r"Etape suivante: .\test.ps1")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:
+        print(f"ERREUR: {exc}", file=sys.stderr)
+        raise
