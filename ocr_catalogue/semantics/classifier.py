@@ -232,9 +232,44 @@ def _find_prices(page: PageScene) -> list[NumericFact]:
     return unique
 
 
+_TECHNICAL_MEASURE_UNIT = r"(?:BTU|WATTS?|W|TOURS?(?:/MIN)?|HZ|V|USB|CM|MM|POUCES?)"
+
+
+def _normalize_technical_measure_text(text: str) -> str:
+    """Repair thousands split around a technical unit by PDF text ordering."""
+    clean = re.sub(r"\s+", " ", (text or "")).strip()
+    clean = re.sub(
+        rf"\b(\d{{1,3}})\s*({_TECHNICAL_MEASURE_UNIT})\s*[,.\s]\s*(\d{{3}})\b",
+        lambda match: f"{match.group(1)}{match.group(3)} {match.group(2)}",
+        clean,
+        flags=re.I,
+    )
+    clean = re.sub(
+        rf"\b(\d{{1,3}})\s*[,.\s]\s*(\d{{3}})\s*({_TECHNICAL_MEASURE_UNIT})\b",
+        lambda match: f"{match.group(1)}{match.group(2)} {match.group(3)}",
+        clean,
+        flags=re.I,
+    )
+    return clean
+
+
+def _technical_measure_atoms(text: str) -> list[str]:
+    """Extract atomic technical measures instead of exporting a whole table row."""
+    clean = _normalize_technical_measure_text(text)
+    pattern = re.compile(
+        rf"\b\d{{1,6}}(?:[,.]\d+)?\s*{_TECHNICAL_MEASURE_UNIT}\b",
+        re.I,
+    )
+    return list(dict.fromkeys(
+        re.sub(r"\s+", " ", match.group(0)).strip()
+        for match in pattern.finditer(clean)
+    ))
+
+
 def _classify_non_price_numbers(page: PageScene) -> list[NumericFact]:
     facts = []
     words = [item for item in page.objects if item.raw_type == "word"]
+
     for marker in [word for word in words if word.text.strip() == "%"]:
         heads = [
             word for word in words
@@ -243,36 +278,151 @@ def _classify_non_price_numbers(page: PageScene) -> list[NumericFact]:
             and abs(marker.bbox.cy - word.bbox.cy) <= max(marker.font_size, word.font_size) * .6
         ]
         if heads:
-            head = min(heads, key=lambda word: abs(marker.bbox.x0 - word.bbox.x1) + abs(marker.bbox.cy - word.bbox.cy))
+            head = min(
+                heads,
+                key=lambda word: abs(marker.bbox.x0 - word.bbox.x1) + abs(marker.bbox.cy - word.bbox.cy),
+            )
             facts.append(NumericFact(
-                f"{head.id}-{marker.id}-discount", page.number, f"{head.text}%", head.text,
-                head.bbox.union(marker.bbox), NumericRole.DISCOUNT, .98,
-                [head.id, marker.id], ["badge_pourcentage"],
+                f"{head.id}-{marker.id}-discount",
+                page.number,
+                f"{head.text}%",
+                head.text,
+                head.bbox.union(marker.bbox),
+                NumericRole.DISCOUNT,
+                .98,
+                [head.id, marker.id],
+                ["badge_pourcentage"],
             ))
+
     for obj in [item for item in page.objects if item.raw_type == "line"]:
-        text = obj.text.strip()
-        role = None
-        confidence = .9
+        raw_text = obj.text.strip()
+        text = _normalize_technical_measure_text(raw_text)
+
         if match := PERCENT.search(text):
-            facts.append(NumericFact(f"{obj.id}-discount", page.number, match.group(0), match.group(1), obj.bbox, NumericRole.DISCOUNT, .96, obj.source_ids, ["symbole_pourcentage"]))
+            facts.append(NumericFact(
+                f"{obj.id}-discount",
+                page.number,
+                match.group(0),
+                match.group(1),
+                obj.bbox,
+                NumericRole.DISCOUNT,
+                .96,
+                obj.source_ids,
+                ["symbole_pourcentage"],
+            ))
+
+        atoms = _technical_measure_atoms(text)
+        for index, atom in enumerate(atoms):
+            role = NumericRole.POWER if re.search(r"\b(?:watts?|w)\b", atom, re.I) else NumericRole.TECHNICAL_SPEC
+            facts.append(NumericFact(
+                f"{obj.id}-{role.value.lower()}-{index}",
+                page.number,
+                atom,
+                atom,
+                obj.bbox,
+                role,
+                .94,
+                obj.source_ids,
+                ["mesure_technique_atomique"],
+            ))
+
         if PRICE_BASIS.search(text):
-            role = NumericRole.PRICE_BASIS
-        elif re.search(r"\b(?:watts?|btu|tours?|hz|usb)\b", text, re.I):
-            role = NumericRole.POWER if re.search(r"watts?|\bw\b", text, re.I) else NumericRole.TECHNICAL_SPEC
-        elif re.search(r"\bgarantie\b|\b\d+\s*(?:ans?|mois)\b", text, re.I):
-            role = NumericRole.DURATION
-        elif re.search(r"\b\d+\s*[x×]\s*\d+\s*(?:cm|mm)\b", text, re.I):
-            role = NumericRole.DIMENSION
-        elif QUANTITY.search(text):
+            facts.append(NumericFact(
+                f"{obj.id}-{NumericRole.PRICE_BASIS.value.lower()}",
+                page.number,
+                text,
+                text,
+                obj.bbox,
+                NumericRole.PRICE_BASIS,
+                .9,
+                obj.source_ids,
+                ["grammaire_contextuelle"],
+            ))
+            continue
+
+        duration_match = re.search(r"\bgarantie\s+\d+\s*(?:ans?|mois)\b", text, re.I)
+        if duration_match:
+            value = re.sub(r"\s+", " ", duration_match.group(0)).strip()
+            facts.append(NumericFact(
+                f"{obj.id}-{NumericRole.DURATION.value.lower()}",
+                page.number,
+                value,
+                value,
+                obj.bbox,
+                NumericRole.DURATION,
+                .92,
+                obj.source_ids,
+                ["garantie_expresse"],
+            ))
+        elif re.fullmatch(r"\s*\d+\s*(?:ans?|mois)\s*", text, re.I):
+            facts.append(NumericFact(
+                f"{obj.id}-{NumericRole.DURATION.value.lower()}",
+                page.number,
+                text,
+                text,
+                obj.bbox,
+                NumericRole.DURATION,
+                .86,
+                obj.source_ids,
+                ["duree_contextuelle"],
+            ))
+
+        dimension_match = re.search(r"\b\d+(?:[,.]\d+)?\s*[x×]\s*\d+(?:[,.]\d+)?\s*(?:cm|mm)\b", text, re.I)
+        if dimension_match:
+            value = re.sub(r"\s+", " ", dimension_match.group(0)).strip()
+            facts.append(NumericFact(
+                f"{obj.id}-{NumericRole.DIMENSION.value.lower()}",
+                page.number,
+                value,
+                value,
+                obj.bbox,
+                NumericRole.DIMENSION,
+                .92,
+                obj.source_ids,
+                ["dimension_atomique"],
+            ))
+
+        if not atoms and QUANTITY.search(text):
             role = NumericRole.PACK_SIZE if re.search(r"lot|[x×]", text, re.I) else NumericRole.QUANTITY
-        elif MODEL.search(text):
-            role = NumericRole.MODEL
-            confidence = .72
-        if role:
-            facts.append(NumericFact(f"{obj.id}-{role.value.lower()}", page.number, text, text, obj.bbox, role, confidence, obj.source_ids, ["grammaire_contextuelle"] ))
-    unique = []
+            facts.append(NumericFact(
+                f"{obj.id}-{role.value.lower()}",
+                page.number,
+                text,
+                text,
+                obj.bbox,
+                role,
+                .9,
+                obj.source_ids,
+                ["grammaire_contextuelle"],
+            ))
+        elif (
+            not atoms
+            and MODEL.search(text)
+            and not re.fullmatch(r"\s*\d{1,4}\s*DT\s*", text, re.I)
+        ):
+            facts.append(NumericFact(
+                f"{obj.id}-{NumericRole.MODEL.value.lower()}",
+                page.number,
+                text,
+                text,
+                obj.bbox,
+                NumericRole.MODEL,
+                .72,
+                obj.source_ids,
+                ["grammaire_contextuelle"],
+            ))
+
+    unique: list[NumericFact] = []
     for fact in facts:
-        duplicate = next((other for other in unique if other.role == fact.role and other.value == fact.value and other.bbox.distance(fact.bbox) < 4), None)
+        duplicate = next(
+            (
+                other for other in unique
+                if other.role == fact.role
+                and other.value == fact.value
+                and other.bbox.distance(fact.bbox) < 4
+            ),
+            None,
+        )
         if duplicate is None:
             unique.append(fact)
     return unique

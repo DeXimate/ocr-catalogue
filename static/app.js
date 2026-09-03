@@ -1,4 +1,4 @@
-const state={job:null,products:[],timer:null,dirty:false};
+const state={job:null,products:[],timer:null,dirty:false,sortKey:'',sortDirection:'asc'};
 const $=selector=>document.querySelector(selector);
 
 async function api(url,options={}){
@@ -18,6 +18,53 @@ function asset(path){
 function selected(){return state.products.filter(product=>product.selected)}
 const wait=milliseconds=>new Promise(resolve=>setTimeout(resolve,milliseconds));
 const columnWidthKey='ocr_catalogue_column_widths_v1';
+const columnSortKey='ocr_catalogue_column_sort_v1';
+const tableColumns=[null,null,'produit','marque','modele','quantite','caracteristiques','variantes_prix','prix_promo','pourcentage','promotion','page','confiance','statut'];
+
+function initColumnSorting(){
+  const headers=[...document.querySelectorAll('.table-wrap thead th')];
+  try{
+    const saved=JSON.parse(localStorage.getItem(columnSortKey)||'null');
+    if(saved&&tableColumns.includes(saved.key)){
+      state.sortKey=saved.key;
+      state.sortDirection=saved.direction==='desc'?'desc':'asc';
+    }
+  }catch(_error){localStorage.removeItem(columnSortKey)}
+
+  const updateHeaders=()=>headers.forEach((header,index)=>{
+    const key=tableColumns[index];
+    if(!key)return;
+    const active=state.sortKey===key;
+    header.classList.add('sortable');
+    header.classList.toggle('sort-asc',active&&state.sortDirection==='asc');
+    header.classList.toggle('sort-desc',active&&state.sortDirection==='desc');
+    header.setAttribute('aria-sort',active?(state.sortDirection==='asc'?'ascending':'descending'):'none');
+  });
+
+  headers.forEach((header,index)=>{
+    const key=tableColumns[index];
+    if(!key)return;
+    header.tabIndex=0;
+    header.title='Trier cette colonne';
+    const toggle=()=>{
+      if(state.sortKey===key)state.sortDirection=state.sortDirection==='asc'?'desc':'asc';
+      else{state.sortKey=key;state.sortDirection='asc'}
+      localStorage.setItem(columnSortKey,JSON.stringify({key:state.sortKey,direction:state.sortDirection}));
+      updateHeaders();
+      render();
+    };
+    header.addEventListener('click',event=>{
+      if(event.target.closest('.column-resizer'))return;
+      toggle();
+    });
+    header.addEventListener('keydown',event=>{
+      if(!['Enter',' '].includes(event.key)||event.target.closest('.column-resizer'))return;
+      event.preventDefault();
+      toggle();
+    });
+  });
+  updateHeaders();
+}
 
 function initColumnResize(){
   const table=document.querySelector('.table-wrap table');
@@ -71,9 +118,11 @@ function initColumnResize(){
       handle.addEventListener('pointerup',stop,{once:true});
       handle.addEventListener('pointercancel',stop,{once:true});
     });
+    handle.addEventListener('click',event=>event.stopPropagation());
     handle.addEventListener('keydown',event=>{
       if(!['ArrowLeft','ArrowRight'].includes(event.key))return;
       event.preventDefault();
+      event.stopPropagation();
       setWidth(widths[index]+(event.key==='ArrowRight'?10:-10));
       saveWidths();
     });
@@ -145,7 +194,25 @@ function showProgress(){
 function visible(){
   const query=$('#search').value.trim().toLowerCase();
   const status=$('#status').value;
-  return state.products.filter(product=>(!query||`${product.produit} ${product.marque}`.toLowerCase().includes(query))&&(!status||product.statut===status));
+  const rows=state.products.filter(product=>(!query||`${product.produit} ${product.marque}`.toLowerCase().includes(query))&&(!status||product.statut===status));
+  if(!state.sortKey)return rows;
+  const numericColumns=new Set(['prix_promo','pourcentage','page','confiance']);
+  const valueOf=product=>{
+    const raw=String(product[state.sortKey]??'').trim();
+    if(!numericColumns.has(state.sortKey))return raw;
+    const match=raw.replace(/\s/g,'').match(/-?\d+(?:[,.]\d+)?/);
+    return match?Number(match[0].replace(',','.')):null;
+  };
+  return rows.map((product,index)=>({product,index})).sort((left,right)=>{
+    const a=valueOf(left.product),b=valueOf(right.product);
+    const aEmpty=a===null||a==='',bEmpty=b===null||b==='';
+    if(aEmpty!==bEmpty)return aEmpty?1:-1;
+    if(aEmpty&&bEmpty)return left.index-right.index;
+    const comparison=numericColumns.has(state.sortKey)
+      ?a-b
+      :String(a).localeCompare(String(b),'fr',{numeric:true,sensitivity:'base'});
+    return (state.sortDirection==='desc'?-comparison:comparison)||(left.index-right.index);
+  }).map(item=>item.product);
 }
 
 function editableCell(product,key){return `<td data-column="${key}"><input data-key="${key}" aria-label="${key}" value="${esc(product[key])}"></td>`}
@@ -303,5 +370,8 @@ $('#confirmExport').onclick=async event=>{
   finally{button.disabled=false;button.textContent='Créer l’export'}
 };
 
-requestAnimationFrame(initColumnResize);
+requestAnimationFrame(()=>{
+  initColumnResize();
+  initColumnSorting();
+});
 loadJobs().then(render).catch(error=>toast(`Chargement impossible : ${error.message}`));

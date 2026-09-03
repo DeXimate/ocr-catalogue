@@ -908,6 +908,63 @@ _MODEL_AFTER_BRAND = re.compile(
 )
 
 
+_TECHNICAL_HEADER_WORDS = {"puissance", "froid", "chaud", "prix"}
+_MONEYISH_MODEL = re.compile(r"^\s*\+?\d{1,4}(?:[,.]\d{3})?\s*DT\s*$", re.I)
+_MODEL_TOKEN = re.compile(r"\b[A-Z0-9][A-Z0-9._/-]{4,}\b")
+
+
+def _normalize_technical_text(text: str) -> str:
+    """Normalize display text for technical characteristics."""
+    clean = re.sub(r"\s+", " ", (text or "")).strip(" -•")
+    unit = r"(?:BTU|WATTS?|W|TOURS?(?:/MIN)?|HZ|V|USB|CM|MM|POUCES?)"
+    clean = re.sub(
+        rf"\b(\d{{1,3}})\s*({unit})\s*[,.\s]\s*(\d{{3}})\b",
+        lambda match: f"{match.group(1)}{match.group(3)} {match.group(2)}",
+        clean,
+        flags=re.I,
+    )
+    clean = re.sub(
+        rf"\b(\d{{1,3}})\s*[,.\s]\s*(\d{{3}})\s*({unit})\b",
+        lambda match: f"{match.group(1)}{match.group(2)} {match.group(3)}",
+        clean,
+        flags=re.I,
+    )
+    return clean
+
+
+def _is_structural_technical_text(text: str) -> bool:
+    """Reject mini-table headers that describe layout, not the product."""
+    clean = _normalize_technical_text(text)
+    lowered = clean.lower().strip(" :;-")
+    if lowered == "prix":
+        return True
+    if re.fullmatch(r"chaud\s*/\s*froid", lowered, re.I):
+        return False
+    words = re.findall(r"[a-zà-ÿ]+", lowered)
+    if len(words) >= 2 and set(words).issubset(_TECHNICAL_HEADER_WORDS):
+        return True
+    return "prix" in words and any(word in {"puissance", "froid", "chaud"} for word in words)
+
+
+def _model_token_from_text(text: str) -> str:
+    """Find a plausible appliance model while rejecting prices such as 148DT."""
+    candidates: list[str] = []
+    for match in _MODEL_TOKEN.finditer(text or ""):
+        token = match.group(0).strip("-./")
+        if not token or _MONEYISH_MODEL.fullmatch(token):
+            continue
+        if re.fullmatch(r"\d+(?:DT|DTT)", token, re.I):
+            continue
+        if not (re.search(r"[A-Z]", token) and re.search(r"\d", token)):
+            continue
+        if len(token) < 6 and not re.search(r"[-_/]", token):
+            continue
+        candidates.append(token)
+    if not candidates:
+        return ""
+    return max(candidates, key=lambda token: (len(token), token.count("-") + token.count("/")))
+
+
 def _is_appliance_offer(product: str, objects: list[VisualObject]) -> bool:
     if _APPLIANCE_PRODUCT.search(product or ""):
         return True
@@ -919,12 +976,17 @@ def _is_appliance_offer(product: str, objects: list[VisualObject]) -> bool:
 
 
 def _extract_model(objects: list[VisualObject]) -> str:
-    explicit = [obj.text.strip() for obj in objects if obj.semantic_role == SemanticRole.MODEL and obj.text.strip()]
+    explicit = [
+        obj.text.strip()
+        for obj in objects
+        if obj.semantic_role == SemanticRole.MODEL
+        and obj.text.strip()
+        and not _MONEYISH_MODEL.fullmatch(obj.text.strip())
+        and not re.fullmatch(r"\d+(?:DT|DTT)", obj.text.strip(), re.I)
+    ]
     if explicit:
         return explicit[0]
-    # Monoprix frequently prints brand and model on the same physical line,
-    # e.g. “MAXWELL” MX-CH12T-INV4-S. The line is semantically BRAND, so recover
-    # the first alphanumeric reference immediately after the closing quote.
+
     for obj in objects:
         if obj.semantic_role != SemanticRole.BRAND:
             continue
@@ -932,9 +994,20 @@ def _extract_model(objects: list[VisualObject]) -> str:
         if not match:
             continue
         token = match.group(1).strip("-./")
-        if re.search(r"[A-Z]", token) and re.search(r"\d", token):
+        if (
+            not _MONEYISH_MODEL.fullmatch(token)
+            and re.search(r"[A-Z]", token)
+            and re.search(r"\d", token)
+        ):
             return token
-    return ""
+
+    candidates = [
+        _model_token_from_text(obj.text)
+        for obj in objects
+        if obj.text.strip()
+    ]
+    candidates = [candidate for candidate in candidates if candidate]
+    return max(candidates, key=len) if candidates else ""
 
 
 def _dedupe_text(values: list[str]) -> list[str]:
@@ -978,24 +1051,33 @@ def _format_and_characteristics(
     objects: list[VisualObject],
     facts: list[NumericFact],
 ) -> tuple[str, list[str]]:
-    quantities = [obj.text for obj in objects if obj.semantic_role == SemanticRole.QUANTITY]
+    quantities = [
+        _normalize_technical_text(obj.text)
+        for obj in objects
+        if obj.semantic_role == SemanticRole.QUANTITY
+    ]
     appliance = _is_appliance_offer(product, objects)
 
     characteristics: list[str] = []
     for obj in objects:
         if obj.semantic_role != SemanticRole.TECHNICAL_SPEC:
             continue
-        text = obj.text.strip()
+        text = _normalize_technical_text(obj.text)
         if not text or _CREDIT_ONLY.search(text):
             continue
-        # Do not expose generic variant copy as a technical characteristic.
+        if re.search(r"\b[àa]\s*$", text, re.I):
+            continue
+        if _is_structural_technical_text(text):
+            continue
+        if (
+            re.search(r"\bprix\b", text, re.I)
+            and re.search(r"\b(?:puissance|froid|chaud)\b", text, re.I)
+        ):
+            continue
         if appliance or _CHARACTERISTIC_CUE.search(text):
             characteristics.append(text)
 
-    # Numeric facts are kept as evidence even when line classification was
-    # imperfect. This recovers BTU, power, dimensions, duration, etc.
     for fact in facts:
-        # Variant prices belong to their own commercial field, never characteristics.
         if fact.role == NumericRole.VARIANT_PRICE or "prix_variante_non_exporte" in fact.evidence:
             continue
         if fact.role not in {
@@ -1006,21 +1088,20 @@ def _format_and_characteristics(
             NumericRole.TECHNICAL_SPEC,
         }:
             continue
-        text = fact.text.strip()
-        if not text or _CREDIT_ONLY.search(text):
+        text = _normalize_technical_text(fact.text)
+        if not text or _CREDIT_ONLY.search(text) or _is_structural_technical_text(text):
             continue
         if fact.role == NumericRole.DURATION and not re.search(r"garantie", text, re.I):
-            # Bare 18/36 months on these catalogues is usually credit duration.
             continue
         characteristics.append(text)
 
     if appliance:
-        # Capacity-like lines are technical on appliances: 12000 BTU,
-        # refrigerator 420 L, washing-machine 7 kg, freezer 84 L, etc.
-        characteristics.extend(quantities)
+        characteristics.extend(
+            quantity for quantity in quantities
+            if quantity and not _is_structural_technical_text(quantity)
+        )
         retail_format = ""
     else:
-        # Food, cleaning, hygiene and other FMCG keep their commercial pack.
         retail_format = quantities[-1] if quantities else ""
 
     return retail_format, _dedupe_text(characteristics)

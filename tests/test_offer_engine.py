@@ -4,7 +4,7 @@ from ocr_catalogue.domain import BBox, DocumentScene, NumericFact, NumericRole, 
 from ocr_catalogue.graph import build_spatial_graph
 from ocr_catalogue.ingestion.pdf_scene import _collapse_overprint_word, _line_objects
 from ocr_catalogue.offers.panel_detector import detect_native_panels
-from ocr_catalogue.offers.resolver import _extract_model, _format_and_characteristics, _merge_product_with_priced_brand, _offer_bbox, _offer_candidates, _partition_container, _pick_product, _reassign_secondary_facts, _variant_prices
+from ocr_catalogue.offers.resolver import _extract_model, _format_and_characteristics, _is_structural_technical_text, _merge_product_with_priced_brand, _normalize_technical_text, _offer_bbox, _offer_candidates, _partition_container, _pick_product, _reassign_secondary_facts, _variant_prices
 from ocr_catalogue.offers.region_solver import build_offer_nuclei, solve_page_regions
 from ocr_catalogue.pipeline import _to_product
 from ocr_catalogue.semantics.classifier import _classify_lines, _classify_non_price_numbers, _find_prices, parse_promotion
@@ -172,6 +172,57 @@ class OfferEngineTests(unittest.TestCase):
             NumericFact("medium", 1, "22 DT ,900", "22,900", BBox(0, 20, 10, 30), NumericRole.VARIANT_PRICE, .95, evidence=["prix_variante", "variant_label:medium"]),
         ]
         self.assertEqual(_variant_prices(facts), "small : 19,900 DT • medium : 22,900 DT")
+
+    def test_split_thousands_btu_is_normalized(self):
+        self.assertEqual(_normalize_technical_text("12 BTU ,000"), "12000 BTU")
+        self.assertEqual(_normalize_technical_text("18 ,000 BTU"), "18000 BTU")
+
+    def test_appliance_table_headers_are_not_characteristics(self):
+        objects = [
+            VisualObject(
+                "header", 1, "line", BBox(0, 0, 120, 10),
+                text="Puissance Froid Chaud Prix",
+                semantic_role=SemanticRole.TECHNICAL_SPEC,
+                semantic_confidence=.9,
+            ),
+            VisualObject(
+                "feature", 1, "line", BBox(0, 20, 80, 30),
+                text="CHAUD/FROID",
+                semantic_role=SemanticRole.TECHNICAL_SPEC,
+                semantic_confidence=.9,
+            ),
+        ]
+        facts = [
+            NumericFact(
+                "btu", 1, "12 BTU ,000", "12000 BTU",
+                BBox(0, 40, 80, 50),
+                NumericRole.TECHNICAL_SPEC, .94,
+                evidence=["mesure_technique_atomique"],
+            ),
+        ]
+        retail_format, characteristics = _format_and_characteristics("Climatiseur", objects, facts)
+        self.assertEqual(retail_format, "")
+        self.assertIn("CHAUD/FROID", characteristics)
+        self.assertIn("12000 BTU", characteristics)
+        self.assertFalse(any("Prix" in value for value in characteristics))
+        self.assertFalse(any("Puissance Froid Chaud" in value for value in characteristics))
+
+    def test_money_amount_cannot_be_model(self):
+        objects = [
+            VisualObject(
+                "bad-model", 1, "line", BBox(0, 0, 30, 10),
+                text="148DT",
+                semantic_role=SemanticRole.MODEL,
+                semantic_confidence=.72,
+            ),
+            VisualObject(
+                "real-model", 1, "line", BBox(0, 20, 120, 30),
+                text="GWH18AWDXB-K6DNA1B - R32",
+                semantic_role=SemanticRole.TECHNICAL_SPEC,
+                semantic_confidence=.9,
+            ),
+        ]
+        self.assertEqual(_extract_model(objects), "GWH18AWDXB-K6DNA1B")
 
     def test_classifier_accepts_only_explicit_free_mechanism(self):
         line = VisualObject("promo", 1, "line", BBox(0, 0, 100, 12), text="2+1 GRATUIT", font_size=10, font_name="Bold")
