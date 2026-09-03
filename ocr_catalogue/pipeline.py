@@ -101,19 +101,35 @@ def _write_diagnostic_contact_sheets(products: list[Product], folder: Path) -> l
     return written
 
 
-def extract_offers(source: Path, folder: Path, raster_pages: list[Path], progress=None) -> list[Product]:
+def extract_offers(source: Path, folder: Path, raster_pages: list[Path], progress=None, cancel=None) -> list[Product]:
+    if cancel:
+        cancel()
     document = extract_document_scene(source, raster_pages)
+    if cancel:
+        cancel()
     classify_document(document)
+    if cancel:
+        cancel()
     infer_catalogue_style(document)
+    if cancel:
+        cancel()
     offers = resolve_document_offers(document)
+    if cancel:
+        cancel()
     products = []
     page_sizes = {page.number: (page.width, page.height) for page in document.pages}
     for index, offer in enumerate(offers):
+        if cancel:
+            cancel()
         crop_rel, product_rel = _crop_offer(offer, raster_pages[offer.page - 1], page_sizes[offer.page], folder)
         products.append(_to_product(offer, crop_rel, product_rel))
         if progress and (index == len(offers) - 1 or offers[index + 1].page != offer.page):
             progress(offer.page, len(document.pages))
+    if cancel:
+        cancel()
     diagnostic_images = _write_diagnostic_contact_sheets(products, folder)
+    if cancel:
+        cancel()
     audit = {
         "engine": "offer-region-v3-native-panels",
         "style": asdict(document.style),

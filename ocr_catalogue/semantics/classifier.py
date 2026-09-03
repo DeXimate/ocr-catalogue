@@ -7,7 +7,7 @@ from collections import Counter
 from ..domain import BBox, DocumentScene, NumericFact, NumericRole, PageScene, SemanticRole, VisualObject
 
 
-ARABIC = re.compile(r"[\u0600-\u06ff]")
+ARABIC = re.compile(r"[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeff]")
 PRICE_COMPACT = re.compile(r"^(\d{1,4})\s*[,\.]\s*(\d{3})\s*(?:DT)?$", re.I)
 MONEY_ONLY = re.compile(r"^\s*(?:\+?\d{1,4}(?:[,.]\d{3})?\s*D+T+\s*){1,6}$", re.I)
 PERCENT = re.compile(r"(?<!\d)(\d{1,2})\s*%")
@@ -77,53 +77,82 @@ def _numeric_context(page: PageScene, bbox: BBox) -> str:
 
 
 def _variant_descriptor(page: PageScene, bbox: BBox) -> str:
-    # Recover the descriptor attached to an alternative price from the same visual row.
+    """Recover only the short label immediately preceding an alternative price."""
     words = [obj for obj in page.objects if obj.raw_type == "word"]
-    row_tolerance = max(12.0, bbox.height * 1.25)
-    horizontal_window = max(150.0, bbox.height * 12.0)
-    left = [
+    cues = [
         word for word in words
-        if word.bbox.x1 <= bbox.x0 + max(3.0, bbox.width * .06)
-        and 0 <= bbox.x0 - word.bbox.x1 <= horizontal_window
-        and abs(word.bbox.cy - bbox.cy) <= max(row_tolerance, word.font_size * 1.7)
+        if word.text.strip().lower().strip(" :;") in {"à", "a"}
+        and -max(1.0, word.font_size * .15) <= bbox.x0 - word.bbox.x1 <= max(8.0, word.font_size * 1.6)
+        and bbox.top - max(4.0, word.font_size * .75) <= word.bbox.cy
+        <= bbox.bottom + max(4.0, word.font_size * .75)
     ]
-    left.sort(key=lambda word: word.bbox.x0)
-    if not left:
+    if not cues:
         return ""
 
-    at_indexes = [
-        index for index, word in enumerate(left)
-        if word.text.strip().lower().strip(":;") in {"à", "a"}
-        and bbox.x0 - word.bbox.x1 <= max(60.0, bbox.height * 4.0)
+    cue = min(cues, key=lambda word: (
+        abs(word.bbox.cy - bbox.cy),
+        bbox.x0 - word.bbox.x1,
+    ))
+    same_row = [
+        word for word in words
+        if word.id != cue.id
+        and word.bbox.x1 <= cue.bbox.x0 + 1.0
+        and 0 <= cue.bbox.x0 - word.bbox.x1 <= max(90.0, cue.font_size * 14.0)
+        and abs(word.bbox.cy - cue.bbox.cy) <= max(3.0, max(word.font_size, cue.font_size) * .65)
     ]
-    if not at_indexes:
-        return ""
-    at_index = at_indexes[-1]
+    same_row.sort(key=lambda word: word.bbox.x0, reverse=True)
 
     tokens: list[str] = []
-    boundary_found = False
-    for index in range(at_index - 1, -1, -1):
-        raw = left[index].text.strip()
+    right_edge = cue.bbox.x0
+    for word in same_row:
+        raw = word.text.strip()
         token = raw.strip(" :;-")
         normalized = token.lower()
-        if normalized in {"en", "et", "existe"}:
-            boundary_found = True
+        gap = right_edge - word.bbox.x1
+        if gap > max(5.0, max(word.font_size, cue.font_size) * 1.8):
+            break
+        if normalized in {"en", "et", "existe", "existee"}:
+            break
+        if ARABIC.search(token) or re.search(r"[“”\"]", token):
             break
         if not token:
+            right_edge = word.bbox.x0
             continue
         compact = token.upper().replace(" ", "")
-        if compact in {"DT", "DTT"} or "%" in token:
+        if compact in {"DT", "DTT"} or "%" in token or MONEY_ONLY.fullmatch(token):
             break
         if re.fullmatch(r"\d{1,4}[,.]\d{3}", token):
             break
         tokens.append(token)
-        if len(tokens) >= 10:
+        right_edge = word.bbox.x0
+        if len(tokens) >= 6:
             break
 
-    if not boundary_found or not tokens:
-        return ""
-    descriptor = re.sub(r"\s+", " ", " ".join(reversed(tokens))).strip(" -,:;")
-    if not descriptor or re.fullmatch(r"\d+", descriptor):
+    if tokens:
+        descriptor = " ".join(reversed(tokens))
+    else:
+        # In compact cards the descriptor can end on the preceding line and
+        # the connector "à" starts the next line immediately before the
+        # alternative price (e.g. "Existe en savon de Marseille" / "à 26,900").
+        previous_lines = [
+            obj for obj in page.objects
+            if obj.raw_type == "line"
+            and obj.semantic_role == SemanticRole.TECHNICAL_SPEC
+            and 0 <= cue.bbox.top - obj.bbox.bottom <= max(8.0, cue.font_size * 1.8)
+            and obj.bbox.x0 <= cue.bbox.x0 + cue.font_size
+            and obj.bbox.x1 >= cue.bbox.x0 - max(30.0, cue.font_size * 8.0)
+        ]
+        if not previous_lines:
+            return ""
+        previous = min(previous_lines, key=lambda obj: cue.bbox.top - obj.bbox.bottom)
+        descriptor = re.sub(
+            r"^\s*(?:(?:et\s+)?(?:existe\s+)?en\s+)",
+            "",
+            previous.text,
+            flags=re.I,
+        )
+    descriptor = re.sub(r"\s+", " ", descriptor).strip(" -,:;")
+    if not descriptor or ARABIC.search(descriptor) or re.fullmatch(r"\d+", descriptor):
         return ""
     return descriptor
 
@@ -137,12 +166,12 @@ def _preceded_by_reference_cue(page: PageScene, bbox: BBox) -> bool:
 
 def _price_role(page: PageScene, bbox: BBox) -> tuple[NumericRole, float, list[str]]:
     context = _numeric_context(page, bbox)
-    plus_near = any(
+    plus_in_amount = any(
         obj.raw_type == "word" and obj.text.strip().startswith("+")
-        and obj.bbox.distance(bbox) <= max(12.0, bbox.height * 1.8)
+        and (obj.bbox.intersection_area(bbox) > 0 or obj.bbox.distance(bbox) <= max(1.5, obj.font_size * .18))
         for obj in page.objects
     )
-    if plus_near and re.search(r"VERS[ÉE]S?", context, re.I):
+    if plus_in_amount and re.search(r"VERS[ÉE]S?", context, re.I):
         return NumericRole.CASHBACK, .96, ["voisinage_verses"]
     if re.search(r"ACHAT\s+[ÀA]\s+CR[ÉE]DIT", context, re.I) and re.search(r"\bmois\b", context, re.I):
         return NumericRole.CREDIT_PAYMENT, .92, ["voisinage_credit"]
@@ -473,14 +502,34 @@ def _classify_lines(page: PageScene) -> None:
     for obj in lines:
         text = obj.text.strip()
         is_bold = bool(re.search(r"(?:bold|black|heavy|semi[- ]?bold|demi)", obj.font_name, re.I))
+        # PDF reading order can merge a nearby millime tail into a bold
+        # designation, for example: Djajet el ayla ,990.
+        product_without_tail = re.sub(r"\s+[,.]\s*\d{3}\s*$", "", text).strip()
+        mixed_product_price_tail = (
+            product_without_tail != text
+            and is_bold
+            and (
+                len(re.findall(r"[A-Za-zÀ-ÿ]{2,}", product_without_tail)) >= 2
+                or bool(re.fullmatch(r"[A-Za-zÀ-ÿ]{3,}", product_without_tail))
+            )
+            and not re.search(r"\bD+T+\b|%", product_without_tail, re.I)
+        )
         if not text:
             continue
         if obj.bbox.top >= page.height * .94 and obj.font_size <= median_size * .72:
             obj.semantic_role, obj.semantic_confidence = SemanticRole.HEADER_FOOTER, .86
+        elif re.search(r"[“\"]([^”\"]+)[”\"]", text):
+            # Quotation marks are the catalogue's explicit brand grammar.
+            # This must win over a retailer-name noise rule: “MONOPRIX” below
+            # a designation is a private-label brand, not a page header.
+            obj.semantic_role, obj.semantic_confidence = SemanticRole.BRAND, .94
         elif NOISE_WORDS.search(text):
             obj.semantic_role, obj.semantic_confidence = SemanticRole.HEADER_FOOTER, .7
         elif ARABIC.search(text) and not re.search(r"[A-Za-zÀ-ÿ]", text):
             obj.semantic_role, obj.semantic_confidence = SemanticRole.ARABIC_TEXT, .93
+        elif mixed_product_price_tail:
+            obj.text = product_without_tail
+            obj.semantic_role, obj.semantic_confidence = SemanticRole.PRODUCT_TEXT, .91
         elif MONEY_ONLY.fullmatch(text):
             obj.semantic_role, obj.semantic_confidence = SemanticRole.RAW_TEXT, .98
         elif PRICE_BASIS.search(text):
@@ -495,8 +544,6 @@ def _classify_lines(page: PageScene) -> None:
             # Keep incomplete OCR fragments out of both promotion and product
             # fields. A bare/corrupted "gratuit" phrase names neither one.
             obj.semantic_role, obj.semantic_confidence = SemanticRole.RAW_TEXT, .88
-        elif re.search(r"[“\"]([^”\"]+)[”\"]", text):
-            obj.semantic_role, obj.semantic_confidence = SemanticRole.BRAND, .94
         elif TECHNICAL_ONLY.search(text) or TECHNICAL_LABEL.search(text) or TECHNICAL.search(text):
             obj.semantic_role, obj.semantic_confidence = SemanticRole.TECHNICAL_SPEC, .9
         elif QUANTITY.search(text):

@@ -4,7 +4,7 @@ from ocr_catalogue.domain import BBox, DocumentScene, NumericFact, NumericRole, 
 from ocr_catalogue.graph import build_spatial_graph
 from ocr_catalogue.ingestion.pdf_scene import _collapse_overprint_word, _line_objects
 from ocr_catalogue.offers.panel_detector import detect_native_panels
-from ocr_catalogue.offers.resolver import _extract_model, _format_and_characteristics, _is_structural_technical_text, _merge_product_with_priced_brand, _normalize_technical_text, _offer_bbox, _offer_candidates, _partition_container, _pick_product, _reassign_secondary_facts, _variant_prices
+from ocr_catalogue.offers.resolver import _extract_model, _format_and_characteristics, _is_structural_technical_text, _merge_duplicate_unpriced_seeds, _merge_mutual_complementary_nuclei, _merge_product_with_priced_brand, _normalize_technical_text, _offer_bbox, _offer_candidates, _partition_container, _pick_product, _reassign_secondary_facts, _variant_prices
 from ocr_catalogue.offers.region_solver import build_offer_nuclei, solve_page_regions
 from ocr_catalogue.pipeline import _to_product
 from ocr_catalogue.semantics.classifier import _classify_lines, _classify_non_price_numbers, _find_prices, parse_promotion
@@ -30,6 +30,33 @@ class OfferEngineTests(unittest.TestCase):
         product = word("product", "Natte de plage", 0, 10, 75, 22, 12)
         price = word("price", "18", 78, 0, 104, 38, 38)
         self.assertEqual([line.text for line in _line_objects(1, [product, price])], ["Natte de plage", "18"])
+
+    def test_card_boundary_splits_words_that_share_a_pdf_baseline(self):
+        left = word("left", '“SOFTY”', 70, 20, 99, 30, 10)
+        right_a = word("right-a", "Serviettes", 101, 20, 145, 30, 10)
+        right_b = word("right-b", "hygiéniques", 147, 20, 195, 30, 10)
+        left_card = VisualObject("left-card", 1, "container", BBox(0, 0, 100, 80))
+        right_card = VisualObject("right-card", 1, "container", BBox(100, 0, 220, 80))
+
+        lines = _line_objects(1, [left, right_a, right_b], [left_card, right_card])
+
+        self.assertEqual([line.text for line in lines], ['“SOFTY”', "Serviettes hygiéniques"])
+
+    def test_numeric_ornament_is_not_merged_into_product_line(self):
+        marker = word("marker", "%", 90, 20, 98, 34, 14)
+        marker.font_name = "Badge"
+        product = word("product", "Granola", 101, 22, 140, 32, 10)
+        product.font_name = "Product-Bold"
+
+        self.assertEqual([line.text for line in _line_objects(1, [marker, product])], ["%", "Granola"])
+
+    def test_bold_product_is_split_from_smaller_regular_specification(self):
+        product = word("product", "Serviette bain", 20, 20, 85, 32, 12)
+        product.font_name = "Product-Bold"
+        size = word("size", "30 x 50 cm", 87, 22, 140, 32, 10)
+        size.font_name = "Body-Regular"
+
+        self.assertEqual([line.text for line in _line_objects(1, [product, size])], ["Serviette bain", "30 x 50 cm"])
 
     def test_quantity_cannot_supply_price_milliemes(self):
         words = [
@@ -156,6 +183,61 @@ class OfferEngineTests(unittest.TestCase):
         self.assertEqual(roles["25,900"], NumericRole.PRICE_MAIN)
         self.assertEqual(roles["19,900"], NumericRole.VARIANT_PRICE)
 
+    def test_variant_descriptor_can_continue_on_the_next_line(self):
+        words = [
+            word("exists", "Existe", 20, 10, 42, 18, 6),
+            word("en", "en", 44, 10, 52, 18, 6),
+            word("soap", "savon", 54, 10, 72, 18, 6),
+            word("de", "de", 74, 10, 82, 18, 6),
+            word("marseille", "Marseille", 84, 10, 112, 18, 6),
+            word("at", "à", 92, 23, 96, 30, 6),
+            word("variant", "26,900DT", 97, 19, 145, 38, 16),
+            word("main", "25,900DT", 150, 0, 210, 40, 30),
+        ]
+        page = PageScene(1, 300, 500, words + _line_objects(1, words))
+        _classify_lines(page)
+
+        prices = {fact.value: fact for fact in _find_prices(page)}
+
+        self.assertEqual(prices["25,900"].role, NumericRole.PRICE_MAIN)
+        self.assertEqual(prices["26,900"].role, NumericRole.VARIANT_PRICE)
+        self.assertIn("variant_label:savon de Marseille", prices["26,900"].evidence)
+
+    def test_neighbouring_cashback_badge_cannot_capture_regular_price(self):
+        words = [
+            word("cashback", "+1", 100, 0, 118, 25, 18),
+            word("cashback-dt", "DT", 120, 5, 130, 15, 8),
+            word("cashback-tail", ",150", 130, 13, 152, 25, 10),
+            word("verses", "VERSÉS", 105, 28, 145, 38, 8),
+            word("main", "22,900DT", 95, 45, 150, 80, 28),
+        ]
+        page = PageScene(1, 300, 500, words + _line_objects(1, words))
+
+        prices = {fact.value: fact.role for fact in _find_prices(page)}
+
+        self.assertEqual(prices["1,150"], NumericRole.CASHBACK)
+        self.assertEqual(prices["22,900"], NumericRole.PRICE_MAIN)
+
+    def test_stacked_variant_price_does_not_capture_nearby_main_price(self):
+        words = [
+            word("arabic", "مقلاة", 0, 24, 24, 34, 8),
+            word("diameter", "Ø", 27, 24, 33, 34, 8),
+            word("size", "28", 35, 24, 46, 34, 8),
+            word("unit", "cm", 48, 24, 60, 34, 8),
+            word("at", "à", 62, 24, 68, 34, 8),
+            word("variant", "32,900DT", 70, 12, 120, 43, 24),
+            # Visually close, but not immediately preceded by the variant cue.
+            word("main", "25,900DT", 145, 10, 205, 50, 32),
+        ]
+        page = PageScene(1, 300, 500, words + _line_objects(1, words))
+
+        prices = {fact.value: fact for fact in _find_prices(page)}
+
+        self.assertEqual(prices["25,900"].role, NumericRole.PRICE_MAIN)
+        self.assertEqual(prices["32,900"].role, NumericRole.VARIANT_PRICE)
+        self.assertIn("variant_label:Ø 28 cm", prices["32,900"].evidence)
+        self.assertNotIn("مقلاة", " ".join(prices["32,900"].evidence))
+
     def test_variant_prices_do_not_leak_into_characteristics(self):
         variant = NumericFact(
             "variant", 1, "19 DT ,900", "19,900", BBox(0, 20, 50, 35),
@@ -239,6 +321,28 @@ class OfferEngineTests(unittest.TestCase):
 
         self.assertEqual(footer.semantic_role, SemanticRole.HEADER_FOOTER)
 
+    def test_quoted_monoprix_is_a_product_brand_not_page_noise(self):
+        brand = VisualObject(
+            "private-label", 1, "line", BBox(20, 40, 85, 52),
+            text='“MONOPRIX”', font_size=10, font_name="ArialNarrow-Bold",
+        )
+        page = PageScene(1, 300, 500, [brand])
+
+        _classify_lines(page)
+
+        self.assertEqual(brand.semantic_role, SemanticRole.BRAND)
+
+    def test_unquoted_monoprix_page_label_remains_noise(self):
+        label = VisualObject(
+            "retailer-label", 1, "line", BBox(20, 40, 85, 52),
+            text="MONOPRIX", font_size=10, font_name="ArialNarrow-Bold",
+        )
+        page = PageScene(1, 300, 500, [label])
+
+        _classify_lines(page)
+
+        self.assertEqual(label.semantic_role, SemanticRole.HEADER_FOOTER)
+
     def test_free_ratio_is_a_promotion(self):
         self.assertEqual(parse_promotion([self.promotion("2+1 GRATUIT")]), "2 achetés + 1 gratuit")
 
@@ -300,6 +404,69 @@ class OfferEngineTests(unittest.TestCase):
         roles = {line.text: line.semantic_role for line in page.objects if line.raw_type == "line"}
         self.assertEqual(roles["Tongs de plage"], SemanticRole.PRODUCT_TEXT)
         self.assertEqual(roles["Femme"], SemanticRole.TECHNICAL_SPEC)
+
+    def test_bold_product_survives_a_merged_millieme_tail(self):
+        line = VisualObject(
+            "mixed-product", 1, "line", BBox(0, 0, 120, 16),
+            text="Djajet el ayla ,990", font_size=12, font_name="ArialNarrow-Bold",
+        )
+        page = PageScene(1, 300, 500, [line])
+
+        _classify_lines(page)
+
+        self.assertEqual(line.text, "Djajet el ayla")
+        self.assertEqual(line.semantic_role, SemanticRole.PRODUCT_TEXT)
+
+    def test_one_word_product_survives_a_merged_millieme_tail(self):
+        for text, expected in (("Mug ,990", "Mug"), ("Tasse ,900", "Tasse"), ("Bol ,900", "Bol")):
+            with self.subTest(text=text):
+                line = VisualObject(
+                    text, 1, "line", BBox(0, 0, 80, 16),
+                    text=text, font_size=12, font_name="BebasNeueBold",
+                )
+                page = PageScene(1, 300, 500, [line])
+                _classify_lines(page)
+                self.assertEqual(line.text, expected)
+                self.assertEqual(line.semantic_role, SemanticRole.PRODUCT_TEXT)
+
+    def test_duplicate_unpriced_seed_merges_into_its_priced_owner(self):
+        product = VisualObject("product", 1, "line", BBox(10, 10, 80, 20), text="Pain de mie", semantic_role=SemanticRole.PRODUCT_TEXT)
+        brand = VisualObject("brand", 1, "line", BBox(10, 22, 90, 32), text='“CHAHYA TAYBA”', semantic_role=SemanticRole.BRAND)
+        price = NumericFact("price", 1, "2,800 DT", "2,800", BBox(100, 10, 140, 35), NumericRole.PRICE_MAIN, .95)
+        page = PageScene(1, 300, 500, [product, brand], numeric_facts=[price])
+        target = OfferCandidate("offer-price", 1, ["product"], ["price"], BBox(10, 10, 140, 35), assignments={"product": .9})
+        orphan = OfferCandidate("offer-product", 1, ["brand"], [], BBox(10, 10, 90, 32), assignments={"brand": .8})
+
+        candidates = [target, orphan]
+        _merge_duplicate_unpriced_seeds(page, candidates)
+
+        self.assertEqual(candidates, [target])
+        self.assertIn("brand", target.object_ids)
+
+    def test_mutually_closest_product_and_price_nuclei_are_merged(self):
+        product = VisualObject(
+            "product", 1, "line", BBox(20, 40, 90, 54), text="Cookies",
+            semantic_role=SemanticRole.PRODUCT_TEXT, semantic_confidence=.9,
+        )
+        other_product = VisualObject(
+            "other-product", 1, "line", BBox(20, 180, 110, 194), text="Fromage",
+            semantic_role=SemanticRole.PRODUCT_TEXT, semantic_confidence=.9,
+        )
+        price = NumericFact("price", 1, "2,150 DT", "2,150", BBox(105, 38, 145, 62), NumericRole.PRICE_MAIN, .95)
+        other_price = NumericFact("other-price", 1, "8,900 DT", "8,900", BBox(130, 178, 170, 202), NumericRole.PRICE_MAIN, .95)
+        page = PageScene(1, 300, 500, [product, other_product], [price, other_price])
+        source = OfferCandidate("offer-product", 1, [product.id], [], product.bbox)
+        target = OfferCandidate("offer-price", 1, [], [price.id], price.bbox)
+        other_source = OfferCandidate("offer-other-product", 1, [other_product.id], [], other_product.bbox)
+        other_target = OfferCandidate("offer-other-price", 1, [], [other_price.id], other_price.bbox)
+        candidates = [source, target, other_source, other_target]
+
+        _merge_mutual_complementary_nuclei(page, candidates)
+
+        self.assertNotIn(source, candidates)
+        self.assertNotIn(other_source, candidates)
+        self.assertIn(product.id, target.object_ids)
+        self.assertIn(other_product.id, other_target.object_ids)
 
     def test_leading_connective_cannot_replace_bold_product_name(self):
         product = VisualObject(

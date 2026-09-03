@@ -59,7 +59,11 @@ def _word_objects(page_number: int, words: list[dict]) -> list[VisualObject]:
     return objects
 
 
-def _line_objects(page_number: int, words: list[VisualObject]) -> list[VisualObject]:
+def _line_objects(
+    page_number: int,
+    words: list[VisualObject],
+    containers: list[VisualObject] | None = None,
+) -> list[VisualObject]:
     if not words:
         return []
     median_height = statistics.median(max(1.0, word.bbox.height) for word in words)
@@ -71,6 +75,17 @@ def _line_objects(page_number: int, words: list[VisualObject]) -> list[VisualObj
             rows.append([word])
         else:
             row.append(word)
+    containers = containers or []
+
+    def containing_card(word: VisualObject) -> str:
+        matches = [
+            container for container in containers
+            if container.bbox.contains_point(word.bbox.cx, word.bbox.cy, .6)
+        ]
+        # Nested decorative shapes are common. The smallest containing frame
+        # is the most precise available reading-cell boundary.
+        return min(matches, key=lambda item: item.bbox.area).id if matches else ""
+
     lines = []
     line_index = 0
     for row in rows:
@@ -84,10 +99,22 @@ def _line_objects(page_number: int, words: list[VisualObject]) -> list[VisualObj
         for previous, current in zip(ordered, ordered[1:]):
             gap = current.bbox.x0 - previous.bbox.x1
             size_ratio = max(previous.font_size, current.font_size) / max(1.0, min(previous.font_size, current.font_size))
+            previous_card = containing_card(previous)
+            current_card = containing_card(current)
+            crosses_card = bool(previous_card and current_card and previous_card != current_card)
+            changes_type = previous.font_name != current.font_name
             # Price numerals can sit on the same baseline and very close to a
             # designation. Their abrupt type-scale change is a stronger
             # boundary signal than whitespace alone.
-            if gap > split_gap or (gap >= -typical * .08 and size_ratio >= 1.8):
+            if (
+                crosses_card
+                or gap > split_gap
+                or (gap >= -typical * .08 and size_ratio >= 1.8)
+                # A bold designation followed on the same baseline by a
+                # smaller regular specification is two semantic objects even
+                # when InDesign leaves almost no whitespace between them.
+                or (gap >= -typical * .08 and changes_type and size_ratio >= 1.20)
+            ):
                 segments.append([current])
             else:
                 segments[-1].append(current)
@@ -208,7 +235,6 @@ def extract_document_scene(source: Path, raster_pages: list[Path]) -> DocumentSc
                 and 0 <= (float(item.get("top", 0)) + float(item.get("bottom", 0))) / 2 <= page.height
             ]
             word_objects = _word_objects(page_index + 1, _dedupe_words(extracted))
-            lines = _line_objects(page_index + 1, word_objects)
             median_height = statistics.median([obj.bbox.height for obj in word_objects]) if word_objects else 8.0
             images = [
                 obj for obj in _image_objects(page_index + 1, page.images, page.width * page.height)
@@ -218,6 +244,7 @@ def extract_document_scene(source: Path, raster_pages: list[Path]) -> DocumentSc
                 obj for obj in _container_objects(page_index + 1, page, median_height)
                 if 0 <= obj.bbox.cx <= page.width and 0 <= obj.bbox.cy <= page.height
             ]
+            lines = _line_objects(page_index + 1, word_objects, containers)
             raster = raster_pages[page_index]
             separators = _visual_separators(page_index + 1, raster, page.width, page.height)
             pages.append(PageScene(

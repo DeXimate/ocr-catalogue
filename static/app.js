@@ -17,9 +17,9 @@ function asset(path){
 }
 function selected(){return state.products.filter(product=>product.selected)}
 const wait=milliseconds=>new Promise(resolve=>setTimeout(resolve,milliseconds));
-const columnWidthKey='ocr_catalogue_column_widths_v1';
+const columnWidthKey='ocr_catalogue_column_widths_v2';
 const columnSortKey='ocr_catalogue_column_sort_v1';
-const tableColumns=[null,null,'produit','marque','modele','quantite','caracteristiques','variantes_prix','prix_promo','pourcentage','promotion','page','confiance','statut'];
+const tableColumns=[null,null,'produit','marque','modele','quantite','caracteristiques','prix_promo','pourcentage','promotion','page','confiance','statut'];
 
 function initColumnSorting(){
   const headers=[...document.querySelectorAll('.table-wrap thead th')];
@@ -176,7 +176,7 @@ async function loadJob(id){
   state.products=(state.job.products||[]).map(product=>({...product,pourcentage:product.pourcentage||product.remise||''}));
   setDirty(false);
   render();
-  if(['Importé','Traitement'].includes(state.job.status)){
+  if(['Importé','Traitement','Annulation'].includes(state.job.status)){
     showProgress();
     clearTimeout(state.timer);
     state.timer=setTimeout(()=>loadJob(id),1200);
@@ -185,7 +185,7 @@ async function loadJob(id){
 
 function showProgress(){
   const element=$('#progress');
-  if(!state.job||state.job.status==='Terminé'){element.classList.add('hidden');return}
+  if(!state.job||!['Importé','Traitement','Annulation'].includes(state.job.status)){element.classList.add('hidden');return}
   element.classList.remove('hidden');
   element.querySelector('span').style.width=`${state.job.progress||3}%`;
   element.querySelector('p').textContent=`${state.job.status} — ${state.job.progress||0}%`;
@@ -227,7 +227,7 @@ function render(){
     <tr data-id="${product.id}" class="${product.statut==='Validé'?'':'review-row'}">
       <td class="check-cell"><input type="checkbox" data-key="selected" aria-label="Sélectionner ${esc(product.produit)}" ${product.selected?'checked':''}></td>
       <td><img class="thumb" src="${asset(product.photo)}" data-source="${asset(product.source_crop||product.photo)}" alt="${esc(product.produit)}" loading="lazy"></td>
-      ${['produit','marque','modele','quantite','caracteristiques','variantes_prix','prix_promo','pourcentage','promotion'].map(key=>editableCell(product,key)).join('')}
+      ${['produit','marque','modele','quantite','caracteristiques','prix_promo','pourcentage','promotion'].map(key=>editableCell(product,key)).join('')}
       <td>${product.page}</td>
       <td><span class="confidence ${product.confiance>=85?'valid':''}">${product.confiance}%</span></td>
       <td><select class="status-select" data-key="statut" aria-label="Statut de ${esc(product.produit)}"><option ${product.statut==='À vérifier'?'selected':''}>À vérifier</option><option ${product.statut==='Validé'?'selected':''}>Validé</option></select></td>
@@ -243,10 +243,13 @@ function render(){
   $('#selectedCount').textContent=selection;
   $('#selectedCount').classList.toggle('hidden',!selection);
   $('#validate').disabled=!selection;
+  const processing=Boolean(hasJob&&['Importé','Traitement','Annulation'].includes(state.job?.status));
   $('#save').disabled=!hasJob;
-  $('#reprocess').disabled=!hasJob||['Importé','Traitement'].includes(state.job?.status);
-  $('#delete').disabled=!hasJob||['Importé','Traitement'].includes(state.job?.status);
+  $('#reprocess').disabled=!hasJob||processing;
+  $('#delete').disabled=!hasJob||processing;
   $('#export').disabled=!hasJob;
+  $('#cancelProcessing').classList.toggle('hidden',!processing);
+  $('#cancelProcessing').disabled=!processing||state.job?.status==='Annulation';
   $('#all').checked=Boolean(rows.length)&&rows.every(product=>product.selected);
   $('#all').indeterminate=rows.some(product=>product.selected)&&!rows.every(product=>product.selected);
 }
@@ -303,6 +306,28 @@ $('#save').onclick=async()=>{
   if(!state.job)return;
   try{await api(`/api/jobs/${state.job.id}/products`,{method:'PUT',body:JSON.stringify({products:state.products})});setDirty(false);toast('Modifications enregistrées')}
   catch(error){toast(`Enregistrement impossible : ${error.message}`)}
+};
+
+$('#cancelProcessing').onclick=async()=>{
+  if(!state.job||!['Importé','Traitement'].includes(state.job.status))return;
+  const filename=state.job.filename||'ce catalogue';
+  const confirmed=window.confirm(
+    `Annuler le traitement de "${filename}" ?\n\nLe PDF importé sera conservé. Les résultats partiels, images et crops créés pendant ce traitement seront supprimés.`
+  );
+  if(!confirmed)return;
+  const id=state.job.id;
+  const button=$('#cancelProcessing');
+  button.disabled=true;
+  button.textContent='Annulation…';
+  try{
+    await api(`/api/jobs/${id}/cancel`,{method:'POST'});
+    toast('Annulation demandée — arrêt du traitement en cours');
+    await loadJob(id);
+  }catch(error){
+    toast(`Annulation impossible : ${error.message}`);
+  }finally{
+    button.textContent='Annuler le traitement';
+  }
 };
 $('#reprocess').onclick=()=>{
   if(!state.job)return;

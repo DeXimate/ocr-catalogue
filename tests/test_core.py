@@ -187,6 +187,27 @@ class StorageTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, root, True)
         return root / "jobs"
 
+    def test_job_metadata_replace_retries_a_temporary_windows_lock(self):
+        target = self.isolated_jobs().parent / "job.json"
+        target.parent.mkdir(parents=True)
+
+        class FlakyTemporaryFile:
+            def __init__(self):
+                self.attempts = 0
+
+            def replace(self, destination):
+                self.attempts += 1
+                if self.attempts < 3:
+                    raise PermissionError(13, "Accès refusé")
+                destination.write_text("ok", encoding="utf-8")
+
+        temporary = FlakyTemporaryFile()
+        with patch.object(storage.time, "sleep"):
+            storage._replace_job_file(temporary, target, attempts=3)
+
+        self.assertEqual(temporary.attempts, 3)
+        self.assertEqual(target.read_text(encoding="utf-8"), "ok")
+
     def test_delete_job_removes_source_and_all_derived_files(self):
         with patch.object(storage, "JOBS", self.isolated_jobs()):
             job_id, folder = storage.new_job("catalogue.pdf")

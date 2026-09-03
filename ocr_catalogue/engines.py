@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import time
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass
@@ -50,14 +51,40 @@ def _poppler_binary(name: str) -> Path | None:
     return bundled if bundled.exists() else None
 
 
-def render_pdf(source: Path, pages_dir: Path, dpi: int = 150) -> list[Path]:
+def render_pdf(
+    source: Path,
+    pages_dir: Path,
+    dpi: int = 150,
+    cancel=None,
+) -> list[Path]:
     tool = _poppler_binary("pdftoppm")
     if not tool:
         raise RuntimeError("Poppler/pdftoppm est requis pour rendre les pages PDF")
-    prefix = pages_dir / "page"
-    subprocess.run([str(tool), "-jpeg", "-r", str(dpi), str(source), str(prefix)], check=True, capture_output=True)
-    return sorted(pages_dir.glob("page-*.jpg"))
 
+    prefix = pages_dir / "page"
+    command = [str(tool), "-jpeg", "-r", str(dpi), str(source), str(prefix)]
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        while process.poll() is None:
+            if cancel:
+                cancel()
+            time.sleep(.12)
+        stdout, stderr = process.communicate()
+    except Exception:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
+        raise
+
+    if process.returncode:
+        raise subprocess.CalledProcessError(process.returncode, command, output=stdout, stderr=stderr)
+    if cancel:
+        cancel()
+    return sorted(pages_dir.glob("page-*.jpg"))
 
 def _merge_price_tokens(tokens: list[Token]) -> list[tuple[str, Token]]:
     found: list[tuple[str, Token]] = []
@@ -457,10 +484,12 @@ def _crop_images(page_image: Path, bbox: tuple[float, float, float, float], pdf_
     return product_bbox is None
 
 
-def extract_pdf(source: Path, folder: Path, progress=None) -> list[Product]:
-    pages = render_pdf(source, folder / "pages")
+def extract_pdf(source: Path, folder: Path, progress=None, cancel=None) -> list[Product]:
+    pages = render_pdf(source, folder / "pages", cancel=cancel)
+    if cancel:
+        cancel()
     from .pipeline import extract_offers
-    return extract_offers(source, folder, pages, progress)
+    return extract_offers(source, folder, pages, progress, cancel=cancel)
 
 
 def import_image(source: Path, folder: Path) -> list[Product]:
@@ -482,7 +511,12 @@ def import_image(source: Path, folder: Path) -> list[Product]:
     return [Product(id=uid, photo=product_rel, source_crop=crop_rel, produit=text or "OCR requis", page=1, confiance=0, statut="À vérifier", bbox=[0, 0, image.width, image.height], crop_mode="image_complete")]
 
 
-def extract(source: Path, folder: Path, progress=None) -> list[Product]:
+def extract(source: Path, folder: Path, progress=None, cancel=None) -> list[Product]:
+    if cancel:
+        cancel()
     if source.suffix.lower() == ".pdf":
-        return extract_pdf(source, folder, progress)
-    return import_image(source, folder)
+        return extract_pdf(source, folder, progress, cancel=cancel)
+    result = import_image(source, folder)
+    if cancel:
+        cancel()
+    return result

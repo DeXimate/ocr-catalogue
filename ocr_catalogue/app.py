@@ -39,19 +39,48 @@ def process_job(job_id: str, source: Path) -> None:
         if job_id in _processing_jobs:
             return
         _processing_jobs.add(job_id)
+
+    def check_cancelled() -> None:
+        if storage.cancel_requested(job_id):
+            raise storage.JobCancelled("Traitement annulé par l'utilisateur")
+
     try:
+        check_cancelled()
         job = storage.load_job(job_id)
         job["status"] = "Traitement"
         storage.save_job(job_id, job)
 
         def progress(done: int, total: int) -> None:
+            check_cancelled()
             current = storage.load_job(job_id)
-            current["progress"] = round(done / total * 100)
+            current["progress"] = round(done / max(1, total) * 100)
             storage.save_job(job_id, current)
 
-        products = extract(source, storage.job_folder(job_id), progress)
+        products = extract(
+            source,
+            storage.job_folder(job_id),
+            progress,
+            cancel=check_cancelled,
+        )
+        check_cancelled()
+
         job = storage.load_job(job_id)
-        job.update(status="Terminé", progress=100, products=[p.to_dict() for p in products], error="")
+        job.update(
+            status="Terminé",
+            progress=100,
+            products=[p.to_dict() for p in products],
+            error="",
+        )
+    except storage.JobCancelled:
+        try:
+            storage.finalize_cancelled_job(job_id)
+        except Exception as exc:
+            try:
+                job = storage.load_job(job_id)
+                job.update(status="Erreur", error=f"Annulation incomplète : {exc}")
+                storage.save_job(job_id, job)
+            except FileNotFoundError:
+                pass
     except Exception as exc:
         try:
             job = storage.load_job(job_id)
@@ -65,13 +94,22 @@ def process_job(job_id: str, source: Path) -> None:
         with _processing_lock:
             _processing_jobs.discard(job_id)
 
-
 def resume_incomplete_jobs() -> None:
-    """Resume uploads whose worker was interrupted by an application restart."""
+    # Resume interrupted work, but honor an earlier cancellation request.
     for summary in storage.list_jobs():
-        if summary.get("status") not in {"Importé", "Traitement"}:
-            continue
         job_id = summary["id"]
+        status = summary.get("status")
+
+        if status == "Annulation" or storage.cancel_requested(job_id):
+            try:
+                storage.finalize_cancelled_job(job_id)
+            except FileNotFoundError:
+                pass
+            continue
+
+        if status not in {"Importé", "Traitement"}:
+            continue
+
         folder = storage.job_folder(job_id)
         source = next((path for path in folder.glob("source.*") if path.is_file()), None)
         if source is None:
@@ -79,8 +117,8 @@ def resume_incomplete_jobs() -> None:
             job.update(status="Erreur", error="Le fichier source importé est introuvable")
             storage.save_job(job_id, job)
             continue
-        threading.Thread(target=process_job, args=(job_id, source), daemon=True).start()
 
+        threading.Thread(target=process_job, args=(job_id, source), daemon=True).start()
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "OCRCatalogue/0.1"
@@ -168,6 +206,16 @@ class Handler(BaseHTTPRequestHandler):
             source.write_bytes(part.get_payload(decode=True))
             threading.Thread(target=process_job, args=(job_id, source), daemon=True).start()
             return self._json({"id": job_id}, 201)
+        if len(parts) == 4 and parts[:2] == ["api", "jobs"] and parts[3] == "cancel":
+            job_id = parts[2]
+            try:
+                return self._json(storage.request_cancel(job_id), 202)
+            except FileNotFoundError:
+                return self._json({"error": "Catalogue introuvable"}, 404)
+            except RuntimeError as exc:
+                return self._json({"error": str(exc)}, 409)
+            except ValueError:
+                return self._json({"error": "Identifiant invalide"}, 400)
         if len(parts) == 4 and parts[:2] == ["api", "jobs"] and parts[3] == "reprocess":
             job_id = parts[2]
             try:

@@ -32,6 +32,7 @@
         <button id="validate" class="button button-soft"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>Valider <span id="selectedCount" class="button-count hidden">0</span></button>
         <button id="save" class="button button-secondary"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h12l2 2v14H5zM8 4v6h8V4M8 20v-6h8v6"/></svg>Enregistrer</button>
         <button id="reprocess" class="button button-secondary"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></svg>Retraiter</button>
+        <button id="cancelProcessing" class="button button-danger hidden"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h10v10H7z"/></svg>Annuler le traitement</button>
         <button id="delete" class="button button-danger"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m-9 0 1 13h10l1-13M10 11v5m4-5v5"/></svg>Supprimer</button>
         <button id="export" class="button button-primary"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v12m0 0-5-5m5 5 5-5M5 20h14"/></svg>Exporter</button>
       </div>
@@ -48,7 +49,7 @@
     <section class="table-card">
       <div class="table-meta"><div><strong id="visibleCount">0 produit</strong><span id="filterHint"> dans ce catalogue</span></div><span class="edit-hint">Cliquez dans une cellule pour la modifier</span></div>
       <div class="table-wrap">
-        <table><thead><tr><th class="check-cell"><input id="all" type="checkbox" aria-label="Tout sélectionner"></th><th>Photo</th><th>Produit</th><th>Marque</th><th>Modèle</th><th>Format / conditionnement</th><th>Caractéristiques</th><th>Variantes / autres prix</th><th>Prix promo</th><th>Pourcentage</th><th>Promotion</th><th>Page</th><th>Confiance</th><th>Statut</th></tr></thead><tbody id="rows"></tbody></table>
+        <table><thead><tr><th class="check-cell"><input id="all" type="checkbox" aria-label="Tout sélectionner"></th><th>Photo</th><th>Produit</th><th>Marque</th><th>Modèle</th><th>Format / conditionnement</th><th>Caractéristiques</th><th>Prix promo</th><th>Pourcentage</th><th>Promotion</th><th>Page</th><th>Confiance</th><th>Statut</th></tr></thead><tbody id="rows"></tbody></table>
         <div id="empty"><span class="empty-icon" aria-hidden="true">▦</span><strong>Aucun produit à afficher</strong><p>Importez un catalogue ou modifiez vos filtres.</p></div>
       </div>
     </section>

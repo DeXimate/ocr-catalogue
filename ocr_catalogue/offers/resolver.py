@@ -444,6 +444,152 @@ def _merge_product_with_priced_brand(page: PageScene, candidates: list[OfferCand
         candidates[:] = [candidate for candidate in candidates if candidate.id not in merged_ids]
 
 
+def _merge_duplicate_unpriced_seeds(page: PageScene, candidates: list[OfferCandidate]) -> None:
+    """Remove a duplicate orphan when its original product seed has a priced owner.
+
+    Dense free-layout pages can initially preserve a product line as an
+    unpriced review candidate, then assign that same line to the correct
+    price candidate. The orphan may retain only the brand or quantity and
+    otherwise surface as ``Produit à vérifier``. Seed identity is stronger
+    evidence than proximity, so merge its remaining context into the priced
+    OFFER and discard the duplicate.
+    """
+    facts = {fact.id: fact for fact in page.numeric_facts}
+    priced = [
+        candidate for candidate in candidates
+        if any(
+            fact_id in facts and facts[fact_id].role == NumericRole.PRICE_MAIN
+            for fact_id in candidate.numeric_ids
+        )
+    ]
+    merged_ids: set[str] = set()
+    for source in candidates:
+        if source in priced or not source.id.startswith("offer-"):
+            continue
+        seed_id = source.id.removeprefix("offer-")
+        owners = [target for target in priced if seed_id in target.object_ids]
+        if not owners:
+            continue
+        target = max(
+            owners,
+            key=lambda candidate: (
+                candidate.assignments.get(seed_id, 0.0),
+                -candidate.bbox.distance(source.bbox),
+            ),
+        )
+        for obj_id in source.object_ids:
+            if obj_id not in target.object_ids:
+                target.object_ids.append(obj_id)
+            target.assignments[obj_id] = max(
+                target.assignments.get(obj_id, 0.0),
+                source.assignments.get(obj_id, .72),
+            )
+        for fact_id in source.numeric_ids:
+            if fact_id not in target.numeric_ids:
+                target.numeric_ids.append(fact_id)
+        target.evidence.append("fragment_sans_prix_fusionné_par_graine_partagée")
+        merged_ids.add(source.id)
+    if merged_ids:
+        candidates[:] = [candidate for candidate in candidates if candidate.id not in merged_ids]
+
+
+def _merge_mutual_complementary_nuclei(page: PageScene, candidates: list[OfferCandidate]) -> None:
+    """Join a product-only nucleus to its mutually closest price-only nucleus.
+
+    InDesign reading order and dense shared cards can legitimately create one
+    candidate from the bold designation and another from the price badge. A
+    merge is accepted only when both independently choose each other, are
+    close on at least one reading axis, and the price candidate has no other
+    product designation. This keeps the rule catalogue- and grid-independent.
+    """
+    objects = page.object_by_id()
+    facts = {fact.id: fact for fact in page.numeric_facts}
+
+    def products(candidate: OfferCandidate) -> list[VisualObject]:
+        return [
+            objects[obj_id] for obj_id in candidate.object_ids
+            if obj_id in objects and objects[obj_id].semantic_role == SemanticRole.PRODUCT_TEXT
+        ]
+
+    def main_price(candidate: OfferCandidate) -> NumericFact | None:
+        return next(
+            (
+                facts[fact_id] for fact_id in candidate.numeric_ids
+                if fact_id in facts and facts[fact_id].role == NumericRole.PRICE_MAIN
+            ),
+            None,
+        )
+
+    sources = [candidate for candidate in candidates if products(candidate) and main_price(candidate) is None]
+    targets = [candidate for candidate in candidates if main_price(candidate) is not None and not products(candidate)]
+    if not sources or not targets:
+        return
+
+    diagonal = max(1.0, math.hypot(page.width, page.height))
+
+    def affinity(source: OfferCandidate, target: OfferCandidate) -> float:
+        product_box = _union_boxes([obj.bbox for obj in products(source)])
+        price = main_price(target)
+        assert price is not None
+        distance = product_box.distance(price.bbox)
+        if distance > diagonal * .105:
+            return 0.0
+        row_delta = abs(product_box.cy - price.bbox.cy)
+        column_delta = abs(product_box.cx - price.bbox.cx)
+        row_link = math.exp(-row_delta / max(10.0, page.height * .038))
+        column_link = math.exp(-column_delta / max(10.0, page.width * .075))
+        proximity = math.exp(-distance / max(10.0, diagonal * .028))
+        axis_link = max(row_link, column_link)
+        if axis_link < .24:
+            return 0.0
+        return proximity * .58 + axis_link * .42
+
+    source_choice: dict[str, tuple[float, OfferCandidate]] = {}
+    for source in sources:
+        ranked = sorted(
+            ((affinity(source, target), target) for target in targets),
+            key=lambda item: item[0],
+            reverse=True,
+        )
+        if ranked and ranked[0][0] >= .42:
+            source_choice[source.id] = ranked[0]
+
+    target_choice: dict[str, tuple[float, OfferCandidate]] = {}
+    for target in targets:
+        ranked = sorted(
+            ((affinity(source, target), source) for source in sources),
+            key=lambda item: item[0],
+            reverse=True,
+        )
+        if ranked and ranked[0][0] >= .42:
+            target_choice[target.id] = ranked[0]
+
+    merged_ids: set[str] = set()
+    for source in sources:
+        chosen = source_choice.get(source.id)
+        if chosen is None:
+            continue
+        score, target = chosen
+        reverse = target_choice.get(target.id)
+        if reverse is None or reverse[1].id != source.id:
+            continue
+        for obj_id in source.object_ids:
+            if obj_id not in target.object_ids:
+                target.object_ids.append(obj_id)
+            target.assignments[obj_id] = max(
+                target.assignments.get(obj_id, 0.0),
+                source.assignments.get(obj_id, score),
+            )
+        for fact_id in source.numeric_ids:
+            if fact_id not in target.numeric_ids:
+                target.numeric_ids.append(fact_id)
+        target.evidence.append("désignation_et_prix_fusionnés_par_affinité_mutuelle")
+        merged_ids.add(source.id)
+
+    if merged_ids:
+        candidates[:] = [candidate for candidate in candidates if candidate.id not in merged_ids]
+
+
 def _refine_context_assignments(page: PageScene, graph: SpatialGraph, by_candidate: dict[str, OfferCandidate], facts: dict[str, NumericFact], candidates: list[OfferCandidate]) -> None:
     objects = page.object_by_id()
     body_sizes = [obj.font_size for obj in page.objects if obj.raw_type == "line" and obj.font_size > 0]
@@ -1280,6 +1426,8 @@ def resolve_document_offers(document: DocumentScene) -> list[Offer]:
         _assign_objects(page, graph, candidates)
         _merge_product_with_priced_brand(page, candidates)
         _reassign_secondary_facts(page, candidates)
+        _merge_duplicate_unpriced_seeds(page, candidates)
+        _merge_mutual_complementary_nuclei(page, candidates)
 
         # Rebuild structured-card ownership by physical containment after all
         # graph refinements. No neighbouring cell can leak back in afterwards.
