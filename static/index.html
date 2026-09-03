@@ -31,6 +31,7 @@
       <div class="toolbar-actions">
         <button id="validate" class="button button-soft"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>Valider <span id="selectedCount" class="button-count hidden">0</span></button>
         <button id="save" class="button button-secondary"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h12l2 2v14H5zM8 4v6h8V4M8 20v-6h8v6"/></svg>Enregistrer</button>
+        <button id="reprocess" class="button button-secondary"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></svg>Retraiter</button>
         <button id="delete" class="button button-danger"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m-9 0 1 13h10l1-13M10 11v5m4-5v5"/></svg>Supprimer</button>
         <button id="export" class="button button-primary"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v12m0 0-5-5m5 5 5-5M5 20h14"/></svg>Exporter</button>
       </div>
@@ -72,6 +73,15 @@
       <div class="delete-file"><span>Catalogue</span><strong id="deleteFilename"></strong></div>
       <p class="delete-note">Le fichier original conservé dans votre dossier Téléchargements ou OneDrive ne sera pas supprimé.</p>
       <div class="dialog-actions"><button value="cancel" class="button button-secondary">Annuler</button><button id="confirmDelete" type="button" class="button button-danger-solid">Supprimer définitivement</button></div>
+    </form>
+  </dialog>
+  <dialog id="reprocessDialog">
+    <form method="dialog">
+      <div class="dialog-head"><div><p class="eyebrow">Nouvelle extraction</p><h2>Retraiter ce catalogue ?</h2></div><button value="cancel" class="icon-button" aria-label="Fermer">×</button></div>
+      <p class="dialog-copy reprocess-copy">Toutes les anciennes images et données extraites seront supprimées, puis recréées depuis le PDF avec la version actuelle du moteur.</p>
+      <div class="reprocess-file"><span>Catalogue</span><strong id="reprocessFilename"></strong></div>
+      <p class="reprocess-note">Les corrections manuelles et les validations actuelles seront remplacées. Le PDF importé sera conservé.</p>
+      <div class="dialog-actions"><button value="cancel" class="button button-secondary">Annuler</button><button id="confirmReprocess" type="button" class="button button-primary">Supprimer et retraiter</button></div>
     </form>
   </dialog>
   <script src="/app.js"></script>

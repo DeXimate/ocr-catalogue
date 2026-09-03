@@ -49,7 +49,7 @@ function Stop-OcrServer {
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'OCR Catalogue Monoprix'
-$form.ClientSize = New-Object System.Drawing.Size(470, 250)
+$form.ClientSize = New-Object System.Drawing.Size(650, 250)
 $form.StartPosition = 'CenterScreen'
 $form.FormBorderStyle = 'FixedDialog'
 $form.MaximizeBox = $false
@@ -59,7 +59,7 @@ $form.Font = New-Object System.Drawing.Font('Segoe UI', 10)
 
 $brand = New-Object System.Windows.Forms.Panel
 $brand.Location = New-Object System.Drawing.Point(0, 0)
-$brand.Size = New-Object System.Drawing.Size(470, 6)
+$brand.Size = New-Object System.Drawing.Size(650, 6)
 $brand.BackColor = [System.Drawing.Color]::FromArgb(220, 20, 55)
 $form.Controls.Add($brand)
 
@@ -90,7 +90,7 @@ $form.Controls.Add($statusLabel)
 
 $openButton = New-Object System.Windows.Forms.Button
 $openButton.Text = "Ouvrir l${apostrophe}application"
-$openButton.Size = New-Object System.Drawing.Size(190, 44)
+$openButton.Size = New-Object System.Drawing.Size(185, 44)
 $openButton.Location = New-Object System.Drawing.Point(29, 147)
 $openButton.FlatStyle = 'Flat'
 $openButton.FlatAppearance.BorderSize = 0
@@ -100,10 +100,22 @@ $openButton.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 10)
 $openButton.Cursor = [System.Windows.Forms.Cursors]::Hand
 $form.Controls.Add($openButton)
 
+$restartButton = New-Object System.Windows.Forms.Button
+$restartButton.Text = "Red${eAcute}marrer le serveur"
+$restartButton.Size = New-Object System.Drawing.Size(185, 44)
+$restartButton.Location = New-Object System.Drawing.Point(232, 147)
+$restartButton.FlatStyle = 'Flat'
+$restartButton.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(220, 20, 55)
+$restartButton.BackColor = [System.Drawing.Color]::White
+$restartButton.ForeColor = [System.Drawing.Color]::FromArgb(185, 14, 42)
+$restartButton.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 10)
+$restartButton.Cursor = [System.Windows.Forms.Cursors]::Hand
+$form.Controls.Add($restartButton)
+
 $stopButton = New-Object System.Windows.Forms.Button
 $stopButton.Text = "Arr${eCircumflex}ter le serveur"
-$stopButton.Size = New-Object System.Drawing.Size(190, 44)
-$stopButton.Location = New-Object System.Drawing.Point(235, 147)
+$stopButton.Size = New-Object System.Drawing.Size(185, 44)
+$stopButton.Location = New-Object System.Drawing.Point(435, 147)
 $stopButton.FlatStyle = 'Flat'
 $stopButton.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(210, 214, 220)
 $stopButton.BackColor = [System.Drawing.Color]::White
@@ -126,12 +138,14 @@ function Update-Controls {
         $statusLabel.Text = "Serveur actif ${longDash} http://127.0.0.1:8765"
         $statusLabel.ForeColor = [System.Drawing.Color]::FromArgb(22, 120, 84)
         $openButton.Text = "Ouvrir l${apostrophe}application"
+        $restartButton.Enabled = $true
         $stopButton.Enabled = $true
     } else {
         $statusDot.BackColor = [System.Drawing.Color]::FromArgb(151, 158, 169)
         $statusLabel.Text = "Serveur arr${eCircumflex}t${eAcute}"
         $statusLabel.ForeColor = [System.Drawing.Color]::FromArgb(104, 113, 128)
         $openButton.Text = "D${eAcute}marrer et ouvrir"
+        $restartButton.Enabled = $false
         $stopButton.Enabled = $false
     }
 }
@@ -144,6 +158,26 @@ $openButton.Add_Click({
         [System.Windows.Forms.MessageBox]::Show("Le serveur OCR n${apostrophe}a pas pu d${eAcute}marrer.", 'OCR Catalogue Monoprix', 'OK', 'Error') | Out-Null
     }
     $openButton.Enabled = $true
+    Update-Controls
+})
+
+$restartButton.Add_Click({
+    $openButton.Enabled = $false
+    $restartButton.Enabled = $false
+    $stopButton.Enabled = $false
+    $statusDot.BackColor = [System.Drawing.Color]::FromArgb(225, 165, 40)
+    $statusLabel.Text = "Red${eAcute}marrage du serveur..."
+    $statusLabel.ForeColor = [System.Drawing.Color]::FromArgb(145, 94, 0)
+    $form.Refresh()
+
+    $stopped = Stop-OcrServer
+    $started = $false
+    if ($stopped) {
+        $started = Start-OcrServer
+    }
+    if (-not $started) {
+        [System.Windows.Forms.MessageBox]::Show("Le serveur OCR n${apostrophe}a pas pu red${eAcute}marrer.", 'OCR Catalogue Monoprix', 'OK', 'Error') | Out-Null
+    }
     Update-Controls
 })
 

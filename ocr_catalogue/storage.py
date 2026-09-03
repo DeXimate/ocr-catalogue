@@ -30,6 +30,26 @@ def ensure_dirs() -> None:
                 deletion_id = marker.read_text(encoding="ascii").strip()
                 _deletions[deletion_id] = {"id": deletion_id, "status": "deleting"}
                 threading.Thread(target=_remove_tree_eventually, args=(marker.parent, deletion_id), daemon=True).start()
+            # A restart may have interrupted the final cleanup of an earlier
+            # reprocessing. These folders are already detached from the live
+            # job, so they can safely be removed in the background.
+            for stale in JOBS.glob("*/.reprocess-trash-*"):
+                threading.Thread(target=_remove_stale_tree, args=(stale,), daemon=True).start()
+
+
+def _remove_stale_tree(folder: Path) -> None:
+    def remove_readonly(function, path, _error_info):
+        Path(path).chmod(stat.S_IWRITE)
+        function(path)
+
+    for attempt in range(120):
+        try:
+            shutil.rmtree(folder, onerror=remove_readonly)
+            return
+        except FileNotFoundError:
+            return
+        except OSError:
+            time.sleep(min(3.0, .25 + attempt * .08))
 
 
 def _remove_tree_eventually(folder: Path, deletion_id: str) -> None:
@@ -70,7 +90,7 @@ def new_job(filename: str) -> tuple[str, Path]:
     (folder / "pages").mkdir(parents=True)
     (folder / "crops").mkdir()
     (folder / "products").mkdir()
-    save_job(job_id, {"id": job_id, "filename": filename, "status": "Importé", "progress": 0, "products": []})
+    save_job(job_id, {"id": job_id, "filename": filename, "status": "Importé", "progress": 0, "products": [], "asset_version": uuid.uuid4().hex})
     return job_id, folder
 
 
@@ -117,6 +137,41 @@ def update_products(job_id: str, values: list[dict]) -> dict:
     job["products"] = [Product.from_dict(value).to_dict() for value in values]
     save_job(job_id, job)
     return job
+
+
+def prepare_reprocessing(job_id: str) -> Path:
+    """Discard every derived artifact while preserving the imported source."""
+    folder = job_folder(job_id)
+    with _lock:
+        job = load_job(job_id)
+        if job.get("status") in {"Importé", "Traitement"}:
+            raise RuntimeError("Le catalogue est déjà en cours de traitement")
+        source = next((path for path in folder.glob("source.*") if path.is_file()), None)
+        if source is None:
+            raise FileNotFoundError("Le fichier source importé est introuvable")
+
+        # Detach all previous outputs atomically from their public paths first.
+        # This prevents the extraction or the browser from ever seeing a mix of
+        # old and new images. Physical removal then continues in the background.
+        trash = folder / f".reprocess-trash-{uuid.uuid4().hex}"
+        trash.mkdir()
+        for child in list(folder.iterdir()):
+            if child in {source, folder / "job.json", trash}:
+                continue
+            child.replace(trash / child.name)
+
+        for name in ("pages", "crops", "products"):
+            (folder / name).mkdir()
+        job.update(
+            status="Importé",
+            progress=0,
+            products=[],
+            error="",
+            asset_version=uuid.uuid4().hex,
+        )
+        save_job(job_id, job)
+        threading.Thread(target=_remove_stale_tree, args=(trash,), daemon=True).start()
+        return source
 
 
 def delete_job(job_id: str) -> dict:

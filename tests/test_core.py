@@ -198,6 +198,37 @@ class StorageTests(unittest.TestCase):
                 storage.delete_job(job_id)
             self.assertTrue(folder.exists())
 
+    def test_reprocess_preserves_source_and_removes_all_derived_artifacts(self):
+        with patch.object(storage, "JOBS", self.isolated_jobs()):
+            job_id, folder = storage.new_job("catalogue.pdf")
+            source = folder / "source.pdf"
+            source.write_bytes(b"pdf")
+            (folder / "products" / "old.png").write_bytes(b"old image")
+            (folder / "crops" / "old.jpg").write_bytes(b"old crop")
+            (folder / "export.xlsx").write_bytes(b"old export")
+            job = storage.load_job(job_id)
+            old_version = job["asset_version"]
+            job.update(status="Terminé", progress=100, products=[{"id": "old"}])
+            storage.save_job(job_id, job)
+
+            returned_source = storage.prepare_reprocessing(job_id)
+
+            self.assertEqual(returned_source, source.resolve())
+            self.assertEqual(source.read_bytes(), b"pdf")
+            self.assertFalse((folder / "products" / "old.png").exists())
+            self.assertFalse((folder / "crops" / "old.jpg").exists())
+            self.assertFalse((folder / "export.xlsx").exists())
+            refreshed = storage.load_job(job_id)
+            self.assertEqual(refreshed["status"], "Importé")
+            self.assertEqual(refreshed["products"], [])
+            self.assertNotEqual(refreshed["asset_version"], old_version)
+
+    def test_reprocess_rejects_active_extraction(self):
+        with patch.object(storage, "JOBS", self.isolated_jobs()):
+            job_id, _ = storage.new_job("catalogue.pdf")
+            with self.assertRaises(RuntimeError):
+                storage.prepare_reprocessing(job_id)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -157,6 +157,21 @@ class Handler(BaseHTTPRequestHandler):
             source.write_bytes(part.get_payload(decode=True))
             threading.Thread(target=process_job, args=(job_id, source), daemon=True).start()
             return self._json({"id": job_id}, 201)
+        if len(parts) == 4 and parts[:2] == ["api", "jobs"] and parts[3] == "reprocess":
+            job_id = parts[2]
+            try:
+                with _processing_lock:
+                    if job_id in _processing_jobs:
+                        raise RuntimeError("Le catalogue est déjà en cours de traitement")
+                source = storage.prepare_reprocessing(job_id)
+                threading.Thread(target=process_job, args=(job_id, source), daemon=True).start()
+                return self._json({"id": job_id, "status": "Importé", "progress": 0}, 202)
+            except FileNotFoundError as exc:
+                return self._json({"error": str(exc) or "Catalogue introuvable"}, 404)
+            except RuntimeError as exc:
+                return self._json({"error": str(exc)}, 409)
+            except (ValueError, OSError) as exc:
+                return self._json({"error": str(exc)}, 400)
         if len(parts) == 4 and parts[:2] == ["api", "jobs"] and parts[3] == "export":
             job_id = parts[2]
             options = self._body()

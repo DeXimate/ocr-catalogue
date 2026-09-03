@@ -10,7 +10,11 @@ async function api(url,options={}){
 }
 
 function esc(value){return String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]))}
-function asset(path){return path?`/api/assets/${state.job.id}/${encodeURIComponent(path).replaceAll('%2F','/')}`:''}
+function asset(path){
+  if(!path)return '';
+  const version=encodeURIComponent(state.job.asset_version||'initial');
+  return `/api/assets/${state.job.id}/${encodeURIComponent(path).replaceAll('%2F','/')}?v=${version}`;
+}
 function selected(){return state.products.filter(product=>product.selected)}
 const wait=milliseconds=>new Promise(resolve=>setTimeout(resolve,milliseconds));
 
@@ -105,6 +109,7 @@ function render(){
   $('#selectedCount').classList.toggle('hidden',!selection);
   $('#validate').disabled=!selection;
   $('#save').disabled=!hasJob;
+  $('#reprocess').disabled=!hasJob||['Importé','Traitement'].includes(state.job?.status);
   $('#delete').disabled=!hasJob||['Importé','Traitement'].includes(state.job?.status);
   $('#export').disabled=!hasJob;
   $('#all').checked=Boolean(rows.length)&&rows.every(product=>product.selected);
@@ -132,6 +137,7 @@ $('#preview .close').onclick=()=>$('#preview').close();
 closeOnBackdrop($('#preview'));
 closeOnBackdrop($('#exportDialog'));
 closeOnBackdrop($('#deleteDialog'));
+closeOnBackdrop($('#reprocessDialog'));
 $('#file').onchange=async event=>{
   const file=event.target.files[0];
   if(!file)return;
@@ -162,6 +168,25 @@ $('#save').onclick=async()=>{
   if(!state.job)return;
   try{await api(`/api/jobs/${state.job.id}/products`,{method:'PUT',body:JSON.stringify({products:state.products})});setDirty(false);toast('Modifications enregistrées')}
   catch(error){toast(`Enregistrement impossible : ${error.message}`)}
+};
+$('#reprocess').onclick=()=>{
+  if(!state.job)return;
+  $('#reprocessFilename').textContent=state.job.filename||'Catalogue sans nom';
+  $('#reprocessDialog').showModal();
+};
+$('#confirmReprocess').onclick=async event=>{
+  const button=event.currentTarget;
+  if(!state.job)return;
+  const id=state.job.id;
+  button.disabled=true;button.textContent='Nettoyage…';
+  try{
+    await api(`/api/jobs/${id}/reprocess`,{method:'POST'});
+    $('#reprocessDialog').close();
+    state.products=[];setDirty(false);
+    toast('Anciennes images supprimées — nouvelle extraction en cours');
+    await loadJob(id);
+  }catch(error){toast(`Retraitement impossible : ${error.message}`)}
+  finally{button.disabled=false;button.textContent='Supprimer et retraiter'}
 };
 $('#delete').onclick=()=>{
   if(!state.job)return;
