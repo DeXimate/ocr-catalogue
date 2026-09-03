@@ -1106,54 +1106,164 @@ def _format_and_characteristics(
 
     return retail_format, _dedupe_text(characteristics)
 
-def _assemble(page: PageScene, candidates: list[OfferCandidate], graph: SpatialGraph, style, region_solutions: dict[str, RegionSolution]) -> list[Offer]:
+def _assemble(
+    page: PageScene,
+    candidates: list[OfferCandidate],
+    graph: SpatialGraph,
+    style,
+    region_solutions: dict[str, RegionSolution],
+) -> list[Offer]:
     object_map = page.object_by_id()
     fact_map = {fact.id: fact for fact in page.numeric_facts}
-    assignment_owner = {obj_id: candidate.id for candidate in candidates for obj_id in candidate.object_ids}
+    assignment_owner = {
+        obj_id: candidate.id
+        for candidate in candidates
+        for obj_id in candidate.object_ids
+    }
     offers = []
+
     for candidate in candidates:
-        objects = [object_map[obj_id] for obj_id in candidate.object_ids if obj_id in object_map]
-        facts = [fact_map[fact_id] for fact_id in candidate.numeric_ids if fact_id in fact_map]
-        main = next((fact for fact in facts if fact.role == NumericRole.PRICE_MAIN), None)
+        solution = region_solutions[candidate.id]
+        region, crop_mode = solution.region, solution.mode
+
+        local_object_ids = [
+            obj_id
+            for obj_id in candidate.object_ids
+            if obj_id in object_map
+            and region.contains_point(
+                object_map[obj_id].bbox.cx,
+                object_map[obj_id].bbox.cy,
+                2.0,
+            )
+        ]
+        local_numeric_ids = [
+            fact_id
+            for fact_id in candidate.numeric_ids
+            if fact_id in fact_map
+            and region.contains_point(
+                fact_map[fact_id].bbox.cx,
+                fact_map[fact_id].bbox.cy,
+                2.0,
+            )
+        ]
+
+        objects = [object_map[obj_id] for obj_id in local_object_ids]
+        facts = [fact_map[fact_id] for fact_id in local_numeric_ids]
+
+        main = next(
+            (fact for fact in facts if fact.role == NumericRole.PRICE_MAIN),
+            None,
+        )
+        if main is None:
+            main = next(
+                (
+                    fact_map[fact_id]
+                    for fact_id in candidate.numeric_ids
+                    if fact_id in fact_map
+                    and fact_map[fact_id].role == NumericRole.PRICE_MAIN
+                ),
+                None,
+            )
+            if main is not None and main.id not in local_numeric_ids:
+                facts.append(main)
+                local_numeric_ids.append(main.id)
+
         product = _pick_product(objects, main, style)
-        brands = [_brand(obj.text) for obj in objects if obj.semantic_role == SemanticRole.BRAND]
-        arabic = [obj.text for obj in objects if obj.semantic_role == SemanticRole.ARABIC_TEXT]
+        brands = [
+            _brand(obj.text)
+            for obj in objects
+            if obj.semantic_role == SemanticRole.BRAND
+        ]
+        arabic = [
+            obj.text
+            for obj in objects
+            if obj.semantic_role == SemanticRole.ARABIC_TEXT
+        ]
+
         quantity, technical = _format_and_characteristics(product, objects, facts)
         model = _extract_model(objects)
+
+        if model:
+            cleaned_technical = []
+            for value in technical:
+                cleaned = re.sub(
+                    rf"(?<![A-Z0-9]){re.escape(model)}(?![A-Z0-9])",
+                    "",
+                    value,
+                    flags=re.I,
+                )
+                cleaned = re.sub(r"\s*[-–—]\s*", " - ", cleaned)
+                cleaned = re.sub(r"\s+", " ", cleaned).strip(" -•")
+                if cleaned:
+                    cleaned_technical.append(cleaned)
+            technical = _dedupe_text(cleaned_technical)
+
         variant_prices = _variant_prices(facts)
         cashback = next((fact for fact in facts if fact.role == NumericRole.CASHBACK), None)
         percentage = next((fact for fact in facts if fact.role == NumericRole.DISCOUNT), None)
         credit = next((fact for fact in facts if fact.role == NumericRole.CREDIT_PAYMENT), None)
         basis_obj = next((obj for obj in objects if obj.semantic_role == SemanticRole.PRICE_BASIS), None)
-        solution = region_solutions[candidate.id]
-        region, crop_mode = solution.region, solution.mode
-        contamination = _contamination(region, set(candidate.object_ids), page, assignment_owner)
-        components = [main.confidence if main else .25, .92 if product else .3, max(.15, 1 - contamination)]
-        if brands: components.append(.86)
+
+        contamination = _contamination(
+            region,
+            set(local_object_ids),
+            page,
+            assignment_owner,
+        )
+        components = [
+            main.confidence if main else .25,
+            .92 if product else .3,
+            max(.15, 1 - contamination),
+        ]
+        if brands:
+            components.append(.86)
         confidence = math.prod(components) ** (1 / len(components))
+
         contradictions = list(candidate.contradictions)
         review = []
-        if not product: review.append("désignation absente")
-        if not main: review.append("prix principal absent")
-        if contamination > .12 or solution.quality.get("foreign_offer_contamination", 0) >= .5: review.append("contamination avec une offre voisine")
-        if not solution.quality.get("accepted", False): review.append("région d’offre à contrôler")
-        if region.width < page.width * .04 or region.height < page.height * .045: review.append("limites d’offre instables")
-        offers.append(Offer(
-            id=uuid.uuid4().hex[:10], page=page.number, bbox=region,
-            object_ids=candidate.object_ids, image_ids=[obj.id for obj in objects if obj.semantic_role == SemanticRole.IMAGE],
-            product_name=product or "Produit à vérifier", arabic_name=" ".join(dict.fromkeys(arabic)),
-            brand=next((brand for brand in brands if brand), ""), model=model, variant=variant_prices,
-            quantity=quantity, main_price=(main.value + " DT") if main else "",
-            percentage=(percentage.value + " %") if percentage else "",
-            promotion=parse_promotion(objects, (cashback.value + " DT versés") if cashback else ""),
-            cashback=(cashback.value + " DT versés") if cashback else "", price_basis=basis_obj.text if basis_obj else "",
-            credit_payment=(credit.value + " DT") if credit else "", technical_specs=technical,
-            confidence=confidence, evidence=candidate.evidence, contradictions=contradictions,
-            review_reasons=review, crop_mode=crop_mode,
-            safe_bbox=solution.safe_region.as_list(), region_quality=solution.quality,
-        ))
-    return offers
+        if not product:
+            review.append("désignation absente")
+        if not main:
+            review.append("prix principal absent")
+        if contamination > .12 or solution.quality.get("foreign_offer_contamination", 0) >= .5:
+            review.append("contamination avec une offre voisine")
+        if not solution.quality.get("accepted", False):
+            review.append("région d’offre à contrôler")
+        if region.width < page.width * .04 or region.height < page.height * .045:
+            review.append("limites d’offre instables")
 
+        offers.append(Offer(
+            id=uuid.uuid4().hex[:10],
+            page=page.number,
+            bbox=region,
+            object_ids=local_object_ids,
+            image_ids=[obj.id for obj in objects if obj.semantic_role == SemanticRole.IMAGE],
+            product_name=product or "Produit à vérifier",
+            arabic_name=" ".join(dict.fromkeys(arabic)),
+            brand=next((brand for brand in brands if brand), ""),
+            model=model,
+            variant=variant_prices,
+            quantity=quantity,
+            main_price=(main.value + " DT") if main else "",
+            percentage=(percentage.value + " %") if percentage else "",
+            promotion=parse_promotion(
+                objects,
+                (cashback.value + " DT versés") if cashback else "",
+            ),
+            cashback=(cashback.value + " DT versés") if cashback else "",
+            price_basis=basis_obj.text if basis_obj else "",
+            credit_payment=(credit.value + " DT") if credit else "",
+            technical_specs=technical,
+            confidence=confidence,
+            evidence=candidate.evidence,
+            contradictions=contradictions,
+            review_reasons=review,
+            crop_mode=crop_mode,
+            safe_bbox=solution.safe_region.as_list(),
+            region_quality=solution.quality,
+        ))
+
+    return offers
 
 def resolve_document_offers(document: DocumentScene) -> list[Offer]:
     offers = []

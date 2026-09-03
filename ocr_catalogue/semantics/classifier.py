@@ -9,6 +9,7 @@ from ..domain import BBox, DocumentScene, NumericFact, NumericRole, PageScene, S
 
 ARABIC = re.compile(r"[\u0600-\u06ff]")
 PRICE_COMPACT = re.compile(r"^(\d{1,4})\s*[,\.]\s*(\d{3})\s*(?:DT)?$", re.I)
+MONEY_ONLY = re.compile(r"^\s*(?:\+?\d{1,4}(?:[,.]\d{3})?\s*D+T+\s*){1,6}$", re.I)
 PERCENT = re.compile(r"(?<!\d)(\d{1,2})\s*%")
 PRICE_BASIS = re.compile(r"\b(?:LE\s+KG|LES\s+\d+\s*(?:G|KG|ML|CL|L)|LA\s+PI[EÈ]CE)\b", re.I)
 QUANTITY = re.compile(
@@ -480,6 +481,8 @@ def _classify_lines(page: PageScene) -> None:
             obj.semantic_role, obj.semantic_confidence = SemanticRole.HEADER_FOOTER, .7
         elif ARABIC.search(text) and not re.search(r"[A-Za-zÀ-ÿ]", text):
             obj.semantic_role, obj.semantic_confidence = SemanticRole.ARABIC_TEXT, .93
+        elif MONEY_ONLY.fullmatch(text):
+            obj.semantic_role, obj.semantic_confidence = SemanticRole.RAW_TEXT, .98
         elif PRICE_BASIS.search(text):
             obj.semantic_role, obj.semantic_confidence = SemanticRole.PRICE_BASIS, .96
         elif re.search(r"d.?économie|^\s*DT\b|[,\.]\d{3}\b", text, re.I):
@@ -498,9 +501,9 @@ def _classify_lines(page: PageScene) -> None:
             obj.semantic_role, obj.semantic_confidence = SemanticRole.TECHNICAL_SPEC, .9
         elif QUANTITY.search(text):
             obj.semantic_role, obj.semantic_confidence = SemanticRole.QUANTITY, .9
-        elif MODEL.search(text) and not re.search(r"\s", text.strip()):
+        elif MODEL.search(text) and not re.search(r"\s", text.strip()) and not MONEY_ONLY.fullmatch(text):
             obj.semantic_role, obj.semantic_confidence = SemanticRole.MODEL, .72
-        elif len(text) >= 3 and re.search(r"[A-Za-zÀ-ÿ]", text) and not PERCENT.search(text) and not re.search(r"\bDT\b", text, re.I):
+        elif len(text) >= 3 and re.search(r"[A-Za-zÀ-ÿ]", text) and not PERCENT.search(text) and not re.search(r"\d+\s*D+T+\b|\bD+T+\s*\d+", text, re.I) and not MONEY_ONLY.fullmatch(text):
             if is_bold:
                 obj.semantic_role = SemanticRole.PRODUCT_TEXT
                 length_score = min(1.0, len(text) / 18)
